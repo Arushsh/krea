@@ -26,7 +26,9 @@ class WorkflowTests(unittest.TestCase):
             scheduler="beta",
             seed=42,
         )
-        self.assertEqual(workflow["1"]["inputs"]["unet_name"], "krea2_turbo_fp8_scaled.safetensors")
+        self.assertEqual(workflow["1"]["inputs"]["unet_name"], app.CUSTOM_KREA_FILE)
+        self.assertEqual(app.DOWNLOADS[0][0], "mpasila/Krea-2-Models")
+        self.assertEqual(app.DOWNLOADS[0][1], app.CUSTOM_KREA_FILE)
         self.assertEqual(workflow["2"]["inputs"]["clip_name"], "qwen3vl_4b_fp8_scaled.safetensors")
         self.assertEqual(workflow["5"]["inputs"]["text"], "a blue glass sculpture")
         self.assertEqual(workflow["7"]["inputs"]["height"], 768)

@@ -60,12 +60,14 @@ T2I_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2.json"
 EDIT_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2Edit.json"
 
 KREA_REPO = "Comfy-Org/Krea-2"
+CUSTOM_KREA_REPO = "mpasila/Krea-2-Models"
+CUSTOM_KREA_FILE = "pornmasterKrea2_v2TurboInt8.safetensors"
 IDENTITY_REPO = "conradlocke/krea2-identity-edit"
 IDENTITY_FILE = "krea2_identity_edit_v1_2.safetensors"
 KREA_EDIT_NODES = "https://github.com/lbouaraba/comfyui-krea2edit.git"
 
 DOWNLOADS = [
-    (KREA_REPO, "diffusion_models/krea2_turbo_fp8_scaled.safetensors", MODELS / "diffusion_models" / "krea2_turbo_fp8_scaled.safetensors", "Krea 2 Turbo diffusion model"),
+    (CUSTOM_KREA_REPO, CUSTOM_KREA_FILE, MODELS / "diffusion_models" / CUSTOM_KREA_FILE, "PornMaster Krea 2 Turbo diffusion model"),
     (KREA_REPO, "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", MODELS / "text_encoders" / "qwen3vl_4b_fp8_scaled.safetensors", "Qwen3-VL text encoder"),
     (KREA_REPO, "vae/qwen_image_vae.safetensors", MODELS / "vae" / "qwen_image_vae.safetensors", "Qwen image VAE"),
     (IDENTITY_REPO, IDENTITY_FILE, MODELS / "loras" / "krea" / IDENTITY_FILE, "Krea 2 identity-edit adapter"),
@@ -232,7 +234,7 @@ def _t2i_workflow() -> dict[str, Any]:
         return json.loads(json.dumps(_workflow_cache["text2image"]))
     _read_source_workflow(T2I_SOURCE)
     workflow = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "krea2_turbo_fp8_scaled.safetensors", "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": CUSTOM_KREA_FILE, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
         "4": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": _ref("1"), "shift": 4.0}},
@@ -253,7 +255,7 @@ def _edit_workflow(has_second_reference: bool) -> dict[str, Any]:
         "1": {"class_type": "LoadImage", "inputs": {"image": ""}},
         "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
-        "5": {"class_type": "UNETLoader", "inputs": {"unet_name": "krea2_turbo_fp8_scaled.safetensors", "weight_dtype": "default"}},
+        "5": {"class_type": "UNETLoader", "inputs": {"unet_name": CUSTOM_KREA_FILE, "weight_dtype": "default"}},
         "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": _ref("5"), "lora_name": "krea/" + IDENTITY_FILE, "strength_model": 1.0}},
         "7": {"class_type": "VAEEncode", "inputs": {"pixels": _ref("1"), "vae": _ref("4")}},
         "8": {"class_type": "EmptySD3LatentImage", "inputs": {"width": DEFAULT_WIDTH, "height": DEFAULT_HEIGHT, "batch_size": 1}},
@@ -510,7 +512,7 @@ def create_ui() -> gr.Blocks:
 
         def on_mode_change(value: str):
             editing = value == "edit"
-            return gr.update(visible=editing), gr.update(visible=not editing), gr.update(visible=editing), gr.update(visible=not editing)
+            return gr.update(visible=editing), gr.update(visible=not editing), gr.update(visible=editing), gr.update(visible=editing)
 
         mode.change(on_mode_change, inputs=[mode], outputs=[image_inputs, t2i_resolution, edit_controls, edit_prompt])
 
