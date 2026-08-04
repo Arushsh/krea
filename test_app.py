@@ -68,6 +68,13 @@ class WorkflowTests(unittest.TestCase):
         duration = app.get_gpu_duration(steps=8, width=1024, height=1024, gen_budget=120)
         self.assertEqual(duration, 120)
 
+    def test_runtime_uses_ram_pressure_executor_configuration(self):
+        with open(app.__file__, encoding="utf-8") as source_file:
+            source = source_file.read()
+        self.assertIn("cache_type=execution.CacheType.RAM_PRESSURE", source)
+        self.assertIn('"ram": 2.0', source)
+        self.assertIn('"ram_inactive": 8.0', source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -340,7 +340,11 @@ def _execute_workflow(workflow: dict[str, Any]) -> list[str]:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     server_instance = server.PromptServer(loop)
-    executor = execution.PromptExecutor(server_instance)
+    executor = execution.PromptExecutor(
+        server_instance,
+        cache_type=execution.CacheType.RAM_PRESSURE,
+        cache_args={"lru": 0, "ram": 2.0, "ram_inactive": 8.0},
+    )
     prompt_id = str(uuid.uuid4())
     save_id = _find_node(workflow, "SaveImage")
     executor.execute(workflow, prompt_id, extra_data={}, execute_outputs=[save_id])
