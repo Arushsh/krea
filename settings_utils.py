@@ -1,0 +1,172 @@
+"""Portable settings and PNG metadata helpers for the Krea 2 Space."""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, PngImagePlugin
+
+
+APP_ID = "krea-2-turbo-i2i"
+PROFILE_SCHEMA_VERSION = 1
+
+
+def _finite_number(value: Any, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be finite")
+    return number
+
+
+def _text(value: Any, field: str, limit: int = 8192) -> str:
+    result = "" if value is None else str(value)
+    if "\x00" in result or len(result) > limit:
+        raise ValueError(f"{field} is invalid or too long")
+    return result.strip()
+
+
+def build_settings(
+    *,
+    mode: str,
+    prompt: str,
+    edit_prompt: str,
+    width: int,
+    height: int,
+    target_megapixels: float,
+    grounding_px: int,
+    ref_boost: float,
+    ref_boost_a: float,
+    steps: int,
+    cfg: float,
+    sampler_name: str,
+    scheduler: str,
+    seed: int,
+    randomize_seed: bool,
+    gen_budget: float,
+    effective_seed: int | None = None,
+) -> dict[str, Any]:
+    """Build the canonical profile embedded in generated PNG files."""
+    return {
+        "app": APP_ID,
+        "schema_version": PROFILE_SCHEMA_VERSION,
+        "mode": _text(mode, "mode", 32),
+        "prompt": _text(prompt, "prompt"),
+        "edit_prompt": _text(edit_prompt, "edit prompt"),
+        "width": int(width),
+        "height": int(height),
+        "target_megapixels": float(target_megapixels),
+        "grounding_px": int(grounding_px),
+        "ref_boost": float(ref_boost),
+        "ref_boost_a": float(ref_boost_a),
+        "steps": int(steps),
+        "cfg": float(cfg),
+        "sampler_name": _text(sampler_name, "sampler", 64),
+        "scheduler": _text(scheduler, "scheduler", 64),
+        "seed": int(seed),
+        "effective_seed": None if effective_seed is None else int(effective_seed),
+        "randomize_seed": bool(randomize_seed),
+        "gen_budget": float(gen_budget),
+    }
+
+
+def parse_settings_text(text: Any) -> tuple[dict[str, Any], list[str]]:
+    """Parse a Krea JSON profile or a compact A1111-style parameter string."""
+    value = "" if text is None else str(text).strip()
+    if not value:
+        return {}, ["settings text is empty"]
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        lines = value.splitlines()
+        result: dict[str, Any] = {}
+        steps = re.search(r"Steps:\s*(\d+)", value, re.I)
+        cfg = re.search(r"CFG scale:\s*([\d.]+)", value, re.I)
+        sampler = re.search(r"Sampler:\s*([^,\n]+)", value, re.I)
+        seed = re.search(r"Seed:\s*(\d+)", value, re.I)
+        size = re.search(r"Size:\s*(\d+)\s*[xX×]\s*(\d+)", value, re.I)
+        negative_line = next(
+            (index for index, line in enumerate(lines) if line.lower().startswith("negative prompt:")),
+            None,
+        )
+        if negative_line is not None:
+            result["prompt"] = "\n".join(lines[:negative_line]).strip()
+        else:
+            result["prompt"] = lines[0].strip() if lines else ""
+        if steps:
+            result["steps"] = int(steps.group(1))
+        if cfg:
+            result["cfg"] = float(cfg.group(1))
+        if sampler:
+            result["sampler_name"] = sampler.group(1).strip()
+        if seed:
+            result["effective_seed"] = int(seed.group(1))
+        if size:
+            result["width"] = int(size.group(1))
+            result["height"] = int(size.group(2))
+        return result, []
+    if not isinstance(decoded, dict):
+        return {}, ["settings JSON must be an object"]
+    if isinstance(decoded.get("krea_settings"), str):
+        try:
+            decoded = json.loads(decoded["krea_settings"])
+        except json.JSONDecodeError:
+            return {}, ["krea_settings metadata is not valid JSON"]
+    return decoded, []
+
+
+def extract_image_settings(path: str | Path) -> tuple[dict[str, Any], list[str]]:
+    """Extract Krea settings or common parameter text from an image."""
+    try:
+        with Image.open(path) as image:
+            metadata = dict(image.info)
+    except Exception as exc:
+        return {}, [f"could not read image metadata: {exc}"]
+    for key in ("krea_settings", "parameters", "prompt"):
+        raw = metadata.get(key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        if isinstance(raw, str) and raw.strip():
+            data, warnings = parse_settings_text(raw)
+            if data:
+                return data, warnings
+    return {}, ["image contains no recognized Krea settings"]
+
+
+def build_parameters_text(settings: dict[str, Any]) -> str:
+    """Build a readable generation summary for image viewers."""
+    prompt = settings.get("edit_prompt") or settings.get("prompt", "")
+    parts = [
+        f"Steps: {settings.get('steps')}",
+        f"CFG scale: {settings.get('cfg')}",
+        f"Sampler: {settings.get('sampler_name')}",
+        f"Schedule type: {settings.get('scheduler')}",
+        f"Seed: {settings.get('effective_seed', settings.get('seed'))}",
+        f"Size: {settings.get('width')}x{settings.get('height')}",
+    ]
+    if settings.get("mode") == "edit":
+        parts.extend([
+            f"Grounding: {settings.get('grounding_px')}px",
+            f"Reference strength: {settings.get('ref_boost')}",
+            f"Second reference strength: {settings.get('ref_boost_a')}",
+        ])
+    return f"{prompt}\n" + ", ".join(parts)
+
+
+def write_png_metadata(source: str | Path, destination: str | Path, settings: dict[str, Any]) -> None:
+    """Copy an image while adding canonical and readable Krea metadata."""
+    with Image.open(source) as image:
+        output = image.copy()
+        info = PngImagePlugin.PngInfo()
+        for key, value in image.info.items():
+            if key not in {"krea_settings", "parameters"} and isinstance(value, str):
+                info.add_text(key, value)
+        info.add_text("krea_settings", json.dumps(settings, sort_keys=True))
+        info.add_text("parameters", build_parameters_text(settings))
+        output.save(destination, format="PNG", pnginfo=info)
