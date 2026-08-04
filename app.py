@@ -61,13 +61,13 @@ EDIT_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2Edit.json"
 
 KREA_REPO = "Comfy-Org/Krea-2"
 CUSTOM_KREA_REPO = "mpasila/Krea-2-Models"
-CUSTOM_KREA_FILE = "pornmasterKrea2_v2TurboInt8.safetensors"
+CUSTOM_KREA_FILE = "museByStableYogi_v25EXTENDEDTURBO.safetensors"
 IDENTITY_REPO = "conradlocke/krea2-identity-edit"
 IDENTITY_FILE = "krea2_identity_edit_v1_2.safetensors"
 KREA_EDIT_NODES = "https://github.com/lbouaraba/comfyui-krea2edit.git"
 
 DOWNLOADS = [
-    (CUSTOM_KREA_REPO, CUSTOM_KREA_FILE, MODELS / "diffusion_models" / CUSTOM_KREA_FILE, "PornMaster Krea 2 Turbo diffusion model"),
+    (CUSTOM_KREA_REPO, CUSTOM_KREA_FILE, MODELS / "diffusion_models" / CUSTOM_KREA_FILE, "museByStableYogi Krea 2 Turbo diffusion model"),
     (KREA_REPO, "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", MODELS / "text_encoders" / "qwen3vl_4b_fp8_scaled.safetensors", "Qwen3-VL text encoder"),
     (KREA_REPO, "vae/qwen_image_vae.safetensors", MODELS / "vae" / "qwen_image_vae.safetensors", "Qwen image VAE"),
     (IDENTITY_REPO, IDENTITY_FILE, MODELS / "loras" / "krea" / IDENTITY_FILE, "Krea 2 identity-edit adapter"),
