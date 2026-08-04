@@ -54,6 +54,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app._validate_request("edit", "", "", "source.png")
         app._validate_request("edit", "", "change the color", "source.png")
+        app._validate_request("edit", "change the color", "", "source.png")
 
     def test_gpu_duration_accepts_spaces_positional_callback(self):
         values = [

@@ -313,8 +313,8 @@ def _validate_request(mode: str, prompt: str, edit_prompt: str, primary: str | N
     if mode == "edit":
         if not primary:
             raise ValueError("upload a primary image for edit mode")
-        if not (edit_prompt or "").strip():
-            raise ValueError("enter an edit instruction")
+        if not (edit_prompt or prompt or "").strip():
+            raise ValueError("enter an edit instruction in the prompt or edit instruction field")
 
 
 def _inject_t2i(workflow: dict[str, Any], *, prompt: str, width: int, height: int, steps: int, cfg: float, sampler: str, scheduler: str, seed: int) -> None:
@@ -421,6 +421,7 @@ def generate(
     staged: list[pathlib.Path] = []
     try:
         _validate_request(mode, prompt, edit_prompt, primary_image)
+        effective_edit_prompt = (edit_prompt or prompt or "").strip()
         if sampler not in SAMPLERS or scheduler not in SCHEDULERS:
             raise ValueError("unsupported sampler or scheduler")
         _prepare_runtime(progress)
@@ -436,9 +437,9 @@ def generate(
             if second_name:
                 staged.append(INPUT / second_name)
             workflow = _edit_workflow(bool(second_name))
-            _inject_edit(workflow, primary_name=primary_name, second_name=second_name, width=width, height=height, edit_prompt=edit_prompt, grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler=sampler, scheduler=scheduler, seed=effective_seed)
+            _inject_edit(workflow, primary_name=primary_name, second_name=second_name, width=width, height=height, edit_prompt=effective_edit_prompt, grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler=sampler, scheduler=scheduler, seed=effective_seed)
 
-        settings = build_settings(mode=mode, prompt=prompt, edit_prompt=edit_prompt, width=width, height=height, target_megapixels=float(target_megapixels), grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler_name=sampler, scheduler=scheduler, seed=int(seed), randomize_seed=bool(randomize_seed), gen_budget=float(gen_budget), effective_seed=effective_seed)
+        settings = build_settings(mode=mode, prompt=prompt, edit_prompt=effective_edit_prompt, width=width, height=height, target_megapixels=float(target_megapixels), grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler_name=sampler, scheduler=scheduler, seed=int(seed), randomize_seed=bool(randomize_seed), gen_budget=float(gen_budget), effective_seed=effective_seed)
         progress(0.35, desc=f"generating {mode}")
         result_paths = _execute_workflow(workflow)
         destination_dir = pathlib.Path(tempfile.mkdtemp(prefix="krea2_outputs_"))
