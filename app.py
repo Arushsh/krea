@@ -126,12 +126,14 @@ def _ensure_repo(path: pathlib.Path, url: str) -> None:
         _run(["git", "clone", "--depth", "1", url, str(path)])
 
 
-def _apply_utils_namespace_fix() -> None:
-    """Avoid a collision between ComfyUI's utils package and local packages."""
+def _restore_utils_namespace() -> None:
+    """Undo the old root ``utils`` rename if a persistent Space has one."""
     source = COMFY / "utils"
     target = COMFY / "utilities"
-    if source.exists() and not target.exists():
-        source.rename(target)
+    if not source.exists() and target.exists():
+        target.rename(source)
+    if not source.exists():
+        return
     for path in COMFY.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
@@ -139,8 +141,8 @@ def _apply_utils_namespace_fix() -> None:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        updated = re.sub(r"\bfrom utils\b", "from utilities", text)
-        updated = re.sub(r"\bimport utils\b", "import utilities", updated)
+        updated = re.sub(r"\bfrom utilities\b", "from utils", text)
+        updated = re.sub(r"\bimport utilities\b", "import utils", updated)
         if updated != text:
             path.write_text(updated, encoding="utf-8")
 
@@ -153,7 +155,7 @@ def _ensure_comfy() -> None:
     _install_filtered_requirements(COMFY / "requirements.txt")
     CUSTOM_NODES.mkdir(parents=True, exist_ok=True)
     _ensure_repo(CUSTOM_NODES / "comfyui-krea2edit", KREA_EDIT_NODES)
-    _apply_utils_namespace_fix()
+    _restore_utils_namespace()
     for folder in ("diffusion_models", "text_encoders", "vae", "loras/krea"):
         (MODELS / folder).mkdir(parents=True, exist_ok=True)
     INPUT.mkdir(parents=True, exist_ok=True)
@@ -374,7 +376,14 @@ def _prepare_runtime(progress: gr.Progress | None = None) -> None:
     _init_comfy_nodes()
 
 
-def get_gpu_duration(steps: int = DEFAULT_STEPS, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT, gen_budget: float = 0, **_kwargs: Any) -> int:
+def get_gpu_duration(*args: Any, **kwargs: Any) -> int:
+    """Estimate GPU time for Spaces' positional or keyword callback forms."""
+    # spaces.zero invokes a duration callback with the complete generate()
+    # argument list positionally. Keep the indexes aligned with generate().
+    steps = kwargs.get("steps", args[11] if len(args) > 11 else DEFAULT_STEPS)
+    width = kwargs.get("width", args[5] if len(args) > 5 else DEFAULT_WIDTH)
+    height = kwargs.get("height", args[6] if len(args) > 6 else DEFAULT_HEIGHT)
+    gen_budget = kwargs.get("gen_budget", args[17] if len(args) > 17 else 0)
     if gen_budget and int(gen_budget) > 0:
         return max(MIN_GPU_SECONDS, min(MAX_GPU_SECONDS, int(gen_budget)))
     estimate = int(35 + (int(width) * int(height) / 1_000_000) * int(steps) * 3.0)

@@ -55,6 +55,19 @@ class WorkflowTests(unittest.TestCase):
             app._validate_request("edit", "", "", "source.png")
         app._validate_request("edit", "", "change the color", "source.png")
 
+    def test_gpu_duration_accepts_spaces_positional_callback(self):
+        values = [
+            "text2image", "prompt", "", None, None,
+            1024, 1024, 1.4, 768, 1.0, 1.0,
+            8, 1.0, "euler", "beta", 2, False, 0, None,
+        ]
+        duration = app.get_gpu_duration(*values)
+        self.assertGreaterEqual(duration, app.MIN_GPU_SECONDS)
+
+    def test_gpu_duration_accepts_keyword_callback(self):
+        duration = app.get_gpu_duration(steps=8, width=1024, height=1024, gen_budget=120)
+        self.assertEqual(duration, 120)
+
 
 if __name__ == "__main__":
     unittest.main()
