@@ -44,7 +44,10 @@ from settings_utils import (
     PROFILE_SCHEMA_VERSION,
     build_settings,
     extract_image_settings,
+    normalize_custom_loras,
     parse_settings_text,
+    stable_custom_lora_namespace,
+    validate_custom_lora,
     write_png_metadata,
 )
 
@@ -62,12 +65,30 @@ EDIT_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2Edit.json"
 KREA_REPO = "Comfy-Org/Krea-2"
 CUSTOM_KREA_REPO = "mpasila/Krea-2-Models"
 CUSTOM_KREA_FILE = "pornmasterKrea2_v2TurboInt8.safetensors"
+MUSE_KREA_FILE = "museByStableYogi_v25EXTENDEDTURBO.safetensors"
+DEFAULT_BASE_MODEL = CUSTOM_KREA_FILE
+BASE_MODELS = {
+    MUSE_KREA_FILE: {
+        "label": "Muse By Stable Yogi Krea2",
+        "repo": CUSTOM_KREA_REPO,
+        "filename": MUSE_KREA_FILE,
+    },
+    CUSTOM_KREA_FILE: {
+        "label": "PornMaster 色情大師-Krea2",
+        "repo": CUSTOM_KREA_REPO,
+        "filename": CUSTOM_KREA_FILE,
+    },
+}
 IDENTITY_REPO = "conradlocke/krea2-identity-edit"
 IDENTITY_FILE = "krea2_identity_edit_v1_2.safetensors"
 KREA_EDIT_NODES = "https://github.com/lbouaraba/comfyui-krea2edit.git"
+LORA_CATALOG_FILE = "krea2_loras.json"
+LORA_HF_REPO = "mpasila/Krea-2-LoRAs"
+LORA_DEST_DIR = MODELS / "loras" / "krea2"
+LORA_ROOT = MODELS / "loras"
+CUSTOM_LORA_DEST_DIR = LORA_ROOT / "huggingface"
 
 DOWNLOADS = [
-    (CUSTOM_KREA_REPO, CUSTOM_KREA_FILE, MODELS / "diffusion_models" / CUSTOM_KREA_FILE, "PornMaster Krea 2 Turbo diffusion model"),
     (KREA_REPO, "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", MODELS / "text_encoders" / "qwen3vl_4b_fp8_scaled.safetensors", "Qwen3-VL text encoder"),
     (KREA_REPO, "vae/qwen_image_vae.safetensors", MODELS / "vae" / "qwen_image_vae.safetensors", "Qwen image VAE"),
     (IDENTITY_REPO, IDENTITY_FILE, MODELS / "loras" / "krea" / IDENTITY_FILE, "Krea 2 identity-edit adapter"),
@@ -95,6 +116,8 @@ MAX_GPU_SECONDS = int(os.environ.get("MAX_GPU_SECONDS", "300"))
 _comfy_ready = False
 _nodes_ready = False
 _workflow_cache: dict[str, dict[str, Any]] = {}
+_lora_catalog: list[dict[str, Any]] = []
+_lora_by_filename: dict[str, dict[str, Any]] = {}
 
 
 def _run(command: list[str], cwd: pathlib.Path | None = None, check: bool = True) -> None:
@@ -158,7 +181,14 @@ def _ensure_comfy() -> None:
     CUSTOM_NODES.mkdir(parents=True, exist_ok=True)
     _ensure_repo(CUSTOM_NODES / "comfyui-krea2edit", KREA_EDIT_NODES)
     _restore_utils_namespace()
-    for folder in ("diffusion_models", "text_encoders", "vae", "loras/krea"):
+    for folder in (
+        "diffusion_models",
+        "text_encoders",
+        "vae",
+        "loras/krea",
+        "loras/krea2",
+        "loras/huggingface",
+    ):
         (MODELS / folder).mkdir(parents=True, exist_ok=True)
     INPUT.mkdir(parents=True, exist_ok=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -208,11 +238,117 @@ def _download_to_dest(repo: str, filename: str, destination: pathlib.Path, label
     print(f"[models] ready: {label}", flush=True)
 
 
-def _ensure_models(progress: gr.Progress | None = None) -> None:
+def _load_lora_catalog() -> None:
+    """Load the shipped Krea LoRA catalog in its documented order."""
+    global _lora_catalog, _lora_by_filename
+    path = ROOT / LORA_CATALOG_FILE
+    if not path.exists():
+        path = ROOT.parent / LORA_CATALOG_FILE
+    if not path.exists():
+        print(f"[lora] {LORA_CATALOG_FILE} not found; catalog disabled", flush=True)
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    catalog: list[dict[str, Any]] = []
+    for row in data.get("loras", []):
+        if not isinstance(row, dict) or not row.get("hf_filename"):
+            continue
+        filename = pathlib.PurePosixPath(str(row["hf_filename"]).replace("\\", "/"))
+        if filename.is_absolute() or any(part in {"", ".", ".."} for part in filename.parts):
+            continue
+        catalog.append(dict(row, hf_filename=filename.as_posix()))
+    _lora_catalog = catalog
+    _lora_by_filename = {str(item["hf_filename"]): item for item in catalog}
+    print(f"[lora] loaded {len(_lora_catalog)} Krea LoRAs", flush=True)
+
+
+def _ensure_base_model(base_model: str, progress: gr.Progress | None = None) -> None:
+    """Download the selected approved base checkpoint if it is not cached."""
+    if base_model not in BASE_MODELS:
+        raise ValueError("unsupported Krea base model")
+    item = BASE_MODELS[base_model]
+    _download_to_dest(
+        item["repo"],
+        item["filename"],
+        MODELS / "diffusion_models" / item["filename"],
+        item["label"],
+    )
+
+
+def _ensure_models(
+    base_model: str = DEFAULT_BASE_MODEL,
+    progress: gr.Progress | None = None,
+) -> None:
+    total = len(DOWNLOADS) + 1
     for index, (repo, filename, destination, label) in enumerate(DOWNLOADS):
         if progress:
-            progress(index / len(DOWNLOADS), desc=f"downloading {label}")
+            progress(index / total, desc=f"downloading {label}")
         _download_to_dest(repo, filename, destination, label)
+    if progress:
+        progress(len(DOWNLOADS) / total, desc="downloading selected Krea checkpoint")
+    _ensure_base_model(base_model)
+
+
+def _ensure_lora(hf_filename: str) -> str:
+    """Lazy-download one catalog LoRA and return its ComfyUI path."""
+    normalized = pathlib.PurePosixPath(str(hf_filename).replace("\\", "/")).as_posix()
+    if normalized not in _lora_by_filename:
+        raise ValueError(f"catalog LoRA is not available: {hf_filename}")
+    destination = LORA_DEST_DIR.joinpath(*pathlib.PurePosixPath(normalized).parts)
+    if destination.exists():
+        return pathlib.PurePosixPath("krea2", normalized).as_posix()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    path = pathlib.PurePosixPath(normalized)
+    downloaded = pathlib.Path(
+        hf_hub_download(
+            repo_id=LORA_HF_REPO,
+            filename=path.name,
+            subfolder=None if str(path.parent) == "." else str(path.parent),
+            local_dir=str(LORA_DEST_DIR),
+            token=token,
+        )
+    )
+    if downloaded.resolve() != destination.resolve():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(downloaded), str(destination))
+    return pathlib.PurePosixPath("krea2", normalized).as_posix()
+
+
+def _ensure_custom_lora(row: dict[str, Any]) -> str:
+    """Download one validated custom HF LoRA and return its ComfyUI path."""
+    normalized = validate_custom_lora(row)
+    namespace = stable_custom_lora_namespace(
+        normalized["repo_id"], normalized["filename"], normalized["revision"]
+    )
+    destination_dir = CUSTOM_LORA_DEST_DIR / namespace
+    relative_file = pathlib.PurePosixPath(normalized["filename"])
+    destination = destination_dir.joinpath(*relative_file.parts)
+    if destination.exists():
+        relative = destination.resolve().relative_to(LORA_ROOT.resolve())
+        return pathlib.PurePosixPath(*relative.parts).as_posix()
+
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    kwargs: dict[str, Any] = {
+        "repo_id": normalized["repo_id"],
+        "filename": normalized["filename"],
+        "local_dir": str(destination_dir),
+        "token": token,
+    }
+    if normalized["revision"]:
+        kwargs["revision"] = normalized["revision"]
+    try:
+        downloaded = pathlib.Path(hf_hub_download(**kwargs))
+    except Exception as exc:
+        raise RuntimeError(
+            f"failed to download custom LoRA {normalized['repo_id']}/{normalized['filename']}: {exc}"
+        ) from exc
+    if not downloaded.exists():
+        raise RuntimeError(f"HF Hub returned a missing custom LoRA path: {downloaded}")
+    try:
+        relative = downloaded.resolve().relative_to(LORA_ROOT.resolve())
+    except ValueError as exc:
+        raise RuntimeError("custom LoRA download escaped the managed LoRA directory") from exc
+    return pathlib.PurePosixPath(*relative.parts).as_posix()
 
 
 def _read_source_workflow(path: pathlib.Path) -> dict[str, Any]:
@@ -229,12 +365,15 @@ def _ref(node: str, output: int = 0) -> list[Any]:
     return [node, output]
 
 
-def _t2i_workflow() -> dict[str, Any]:
-    if "text2image" in _workflow_cache:
-        return json.loads(json.dumps(_workflow_cache["text2image"]))
+def _t2i_workflow(base_model: str = DEFAULT_BASE_MODEL) -> dict[str, Any]:
+    if base_model not in BASE_MODELS:
+        raise ValueError("unsupported Krea base model")
+    cache_key = f"text2image:{base_model}"
+    if cache_key in _workflow_cache:
+        return json.loads(json.dumps(_workflow_cache[cache_key]))
     _read_source_workflow(T2I_SOURCE)
     workflow = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": CUSTOM_KREA_FILE, "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": base_model, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
         "4": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": _ref("1"), "shift": 4.0}},
@@ -245,17 +384,22 @@ def _t2i_workflow() -> dict[str, Any]:
         "9": {"class_type": "VAEDecode", "inputs": {"samples": _ref("8"), "vae": _ref("3")}},
         "10": {"class_type": "SaveImage", "inputs": {"images": _ref("9"), "filename_prefix": "krea2_turbo"}},
     }
-    _workflow_cache["text2image"] = workflow
+    _workflow_cache[cache_key] = workflow
     return json.loads(json.dumps(workflow))
 
 
-def _edit_workflow(has_second_reference: bool) -> dict[str, Any]:
+def _edit_workflow(
+    has_second_reference: bool,
+    base_model: str = DEFAULT_BASE_MODEL,
+) -> dict[str, Any]:
+    if base_model not in BASE_MODELS:
+        raise ValueError("unsupported Krea base model")
     _read_source_workflow(EDIT_SOURCE)
     workflow: dict[str, Any] = {
         "1": {"class_type": "LoadImage", "inputs": {"image": ""}},
         "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_4b_fp8_scaled.safetensors", "type": "krea2", "device": "default"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
-        "5": {"class_type": "UNETLoader", "inputs": {"unet_name": CUSTOM_KREA_FILE, "weight_dtype": "default"}},
+        "5": {"class_type": "UNETLoader", "inputs": {"unet_name": base_model, "weight_dtype": "default"}},
         "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": _ref("5"), "lora_name": "krea/" + IDENTITY_FILE, "strength_model": 1.0}},
         "7": {"class_type": "VAEEncode", "inputs": {"pixels": _ref("1"), "vae": _ref("4")}},
         "8": {"class_type": "EmptySD3LatentImage", "inputs": {"width": DEFAULT_WIDTH, "height": DEFAULT_HEIGHT, "batch_size": 1}},
@@ -281,6 +425,40 @@ def _find_node(workflow: dict[str, Any], class_type: str) -> str:
         if node.get("class_type") == class_type:
             return node_id
     raise KeyError(f"workflow does not contain {class_type}")
+
+
+def _inject_lora_chain(
+    workflow: dict[str, Any],
+    enabled_loras: list[tuple[str, float]],
+    *,
+    model_source: list[Any],
+    clip_source: list[Any],
+    model_consumers: list[tuple[str, str]],
+    clip_consumers: list[tuple[str, str]],
+) -> None:
+    """Append an ordered model+CLIP LoRA chain to a workflow."""
+    if not enabled_loras:
+        return
+    previous_model = model_source
+    previous_clip = clip_source
+    for index, (filename, strength) in enumerate(enabled_loras):
+        node_id = f"user_lora_{index}"
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "model": previous_model,
+                "clip": previous_clip,
+                "lora_name": filename,
+                "strength_model": float(strength),
+                "strength_clip": float(strength),
+            },
+        }
+        previous_model = _ref(node_id)
+        previous_clip = _ref(node_id, 1)
+    for node_id, input_name in model_consumers:
+        workflow[node_id]["inputs"][input_name] = previous_model
+    for node_id, input_name in clip_consumers:
+        workflow[node_id]["inputs"][input_name] = previous_clip
 
 
 def _prepare_edit_image(path: str, target_megapixels: float) -> tuple[str, int, int]:
@@ -319,13 +497,58 @@ def _validate_request(mode: str, prompt: str, edit_prompt: str, primary: str | N
             raise ValueError("enter an edit instruction in the prompt or edit instruction field")
 
 
-def _inject_t2i(workflow: dict[str, Any], *, prompt: str, width: int, height: int, steps: int, cfg: float, sampler: str, scheduler: str, seed: int) -> None:
+def _inject_t2i(
+    workflow: dict[str, Any],
+    *,
+    prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    scheduler: str,
+    seed: int,
+    enabled_loras: list[tuple[str, float]] | None = None,
+) -> None:
+    _inject_lora_chain(
+        workflow,
+        enabled_loras or [],
+        model_source=_ref("1"),
+        clip_source=_ref("2"),
+        model_consumers=[("4", "model")],
+        clip_consumers=[("5", "clip")],
+    )
     workflow["5"]["inputs"]["text"] = prompt.strip()
     workflow["7"]["inputs"].update(width=int(width), height=int(height))
     workflow["8"]["inputs"].update(seed=int(seed), steps=int(steps), cfg=float(cfg), sampler_name=sampler, scheduler=scheduler, denoise=1.0)
 
 
-def _inject_edit(workflow: dict[str, Any], *, primary_name: str, second_name: str | None, width: int, height: int, edit_prompt: str, grounding_px: int, ref_boost: float, ref_boost_a: float, steps: int, cfg: float, sampler: str, scheduler: str, seed: int) -> None:
+def _inject_edit(
+    workflow: dict[str, Any],
+    *,
+    primary_name: str,
+    second_name: str | None,
+    width: int,
+    height: int,
+    edit_prompt: str,
+    grounding_px: int,
+    ref_boost: float,
+    ref_boost_a: float,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    scheduler: str,
+    seed: int,
+    enabled_loras: list[tuple[str, float]] | None = None,
+) -> None:
+    _inject_lora_chain(
+        workflow,
+        enabled_loras or [],
+        model_source=_ref("6"),
+        clip_source=_ref("3"),
+        model_consumers=[("9", "model")],
+        clip_consumers=[("10", "clip")],
+    )
     workflow["1"]["inputs"]["image"] = primary_name
     workflow["8"]["inputs"].update(width=int(width), height=int(height))
     workflow["9"]["inputs"].update(ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a))
@@ -376,9 +599,12 @@ def _execute_workflow(workflow: dict[str, Any]) -> list[str]:
     return [str(path) for path in paths]
 
 
-def _prepare_runtime(progress: gr.Progress | None = None) -> None:
+def _prepare_runtime(
+    base_model: str = DEFAULT_BASE_MODEL,
+    progress: gr.Progress | None = None,
+) -> None:
     _ensure_comfy()
-    _ensure_models(progress)
+    _ensure_models(base_model, progress)
     _init_comfy_nodes()
 
 
@@ -392,7 +618,20 @@ def get_gpu_duration(*args: Any, **kwargs: Any) -> int:
     gen_budget = kwargs.get("gen_budget", args[17] if len(args) > 17 else 0)
     if gen_budget and int(gen_budget) > 0:
         return max(MIN_GPU_SECONDS, min(MAX_GPU_SECONDS, int(gen_budget)))
-    estimate = int(35 + (int(width) * int(height) / 1_000_000) * int(steps) * 3.0)
+    lora_weights = kwargs.get("lora_weights", args[19] if len(args) > 19 else {}) or {}
+    custom_loras = kwargs.get("custom_loras", args[20] if len(args) > 20 else []) or []
+    lora_count = sum(
+        1 for value in lora_weights.values()
+        if value and abs(float(value)) > 1e-6
+    )
+    lora_count += sum(1 for row in custom_loras if isinstance(row, (dict, list, tuple)))
+    estimate = int(
+        35
+        + (int(width) * int(height) / 1_000_000)
+        * int(steps)
+        * 3.0
+        * (1 + 0.05 * lora_count)
+    )
     return max(MIN_GPU_SECONDS, min(MAX_GPU_SECONDS, estimate))
 
 
@@ -416,6 +655,9 @@ def generate(
     seed: int,
     randomize_seed: bool,
     gen_budget: float,
+    base_model: str = DEFAULT_BASE_MODEL,
+    lora_weights: dict[str, float] | None = None,
+    custom_loras: list[dict[str, Any]] | None = None,
     progress: gr.Progress = gr.Progress(track_tqdm=True),
 ) -> tuple[list[str], str, int]:
     """Validate inputs, execute the selected Krea graph, and persist outputs."""
@@ -426,22 +668,97 @@ def generate(
         effective_edit_prompt = (edit_prompt or prompt or "").strip()
         if sampler not in SAMPLERS or scheduler not in SCHEDULERS:
             raise ValueError("unsupported sampler or scheduler")
-        _prepare_runtime(progress)
+        if base_model not in BASE_MODELS:
+            raise ValueError("unsupported Krea base model")
+        _prepare_runtime(base_model, progress)
+
+        enabled_loras: list[tuple[str, float]] = []
+        active_catalog: list[dict[str, Any]] = []
+        for filename, weight in (lora_weights or {}).items():
+            if filename not in _lora_by_filename:
+                raise ValueError(f"catalog LoRA is not available: {filename}")
+            numeric_weight = float(weight)
+            if numeric_weight < -3.0 or numeric_weight > 3.0:
+                raise ValueError(f"catalog LoRA weight is out of range: {filename}")
+            if abs(numeric_weight) > 1e-6:
+                enabled_loras.append((_ensure_lora(filename), numeric_weight))
+                active_catalog.append({"hf_filename": filename, "weight": numeric_weight})
+
+        normalized_custom, custom_warnings = normalize_custom_loras(custom_loras)
+        if custom_warnings:
+            raise ValueError("; ".join(custom_warnings))
+        active_custom = [
+            row for row in normalized_custom if abs(float(row["weight"])) > 1e-6
+        ]
+        for row in active_custom:
+            enabled_loras.append((_ensure_custom_lora(row), float(row["weight"])))
+
         if mode == "text2image":
             width = max(512, min(1536, int(width) // 64 * 64))
             height = max(512, min(1536, int(height) // 64 * 64))
-            workflow = _t2i_workflow()
-            _inject_t2i(workflow, prompt=prompt, width=width, height=height, steps=int(steps), cfg=float(cfg), sampler=sampler, scheduler=scheduler, seed=effective_seed)
+            workflow = _t2i_workflow(base_model)
         else:
             primary_name, width, height = _prepare_edit_image(primary_image, target_megapixels)
             staged.append(INPUT / primary_name)
             second_name = _stage_image(second_image, "reference") if second_image else None
             if second_name:
                 staged.append(INPUT / second_name)
-            workflow = _edit_workflow(bool(second_name))
-            _inject_edit(workflow, primary_name=primary_name, second_name=second_name, width=width, height=height, edit_prompt=effective_edit_prompt, grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler=sampler, scheduler=scheduler, seed=effective_seed)
+            workflow = _edit_workflow(bool(second_name), base_model)
 
-        settings = build_settings(mode=mode, prompt=prompt, edit_prompt=effective_edit_prompt, width=width, height=height, target_megapixels=float(target_megapixels), grounding_px=int(grounding_px), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler_name=sampler, scheduler=scheduler, seed=int(seed), randomize_seed=bool(randomize_seed), gen_budget=float(gen_budget), effective_seed=effective_seed)
+        if mode == "text2image":
+            _inject_t2i(
+                workflow,
+                prompt=prompt,
+                width=width,
+                height=height,
+                steps=int(steps),
+                cfg=float(cfg),
+                sampler=sampler,
+                scheduler=scheduler,
+                seed=effective_seed,
+                enabled_loras=enabled_loras,
+            )
+        else:
+            _inject_edit(
+                workflow,
+                primary_name=primary_name,
+                second_name=second_name,
+                width=width,
+                height=height,
+                edit_prompt=effective_edit_prompt,
+                grounding_px=int(grounding_px),
+                ref_boost=float(ref_boost),
+                ref_boost_a=float(ref_boost_a),
+                steps=int(steps),
+                cfg=float(cfg),
+                sampler=sampler,
+                scheduler=scheduler,
+                seed=effective_seed,
+                enabled_loras=enabled_loras,
+            )
+
+        settings = build_settings(
+            mode=mode,
+            prompt=prompt,
+            edit_prompt=effective_edit_prompt,
+            width=width,
+            height=height,
+            target_megapixels=float(target_megapixels),
+            grounding_px=int(grounding_px),
+            ref_boost=float(ref_boost),
+            ref_boost_a=float(ref_boost_a),
+            steps=int(steps),
+            cfg=float(cfg),
+            sampler_name=sampler,
+            scheduler=scheduler,
+            seed=int(seed),
+            randomize_seed=bool(randomize_seed),
+            gen_budget=float(gen_budget),
+            effective_seed=effective_seed,
+            base_model=base_model,
+            catalog_loras=active_catalog,
+            custom_loras=active_custom,
+        )
         progress(0.35, desc=f"generating {mode}")
         result_paths = _execute_workflow(workflow)
         destination_dir = pathlib.Path(tempfile.mkdtemp(prefix="krea2_outputs_"))
@@ -462,8 +779,48 @@ def generate(
                 pass
 
 
-def _profile_from_values(mode: str, prompt: str, edit_prompt: str, width: int, height: int, target_mp: float, grounding: int, ref_boost: float, ref_boost_a: float, steps: int, cfg: float, sampler: str, scheduler: str, seed: int, randomize: bool, budget: float) -> dict[str, Any]:
-    return build_settings(mode=mode, prompt=prompt, edit_prompt=edit_prompt, width=int(width), height=int(height), target_megapixels=float(target_mp), grounding_px=int(grounding), ref_boost=float(ref_boost), ref_boost_a=float(ref_boost_a), steps=int(steps), cfg=float(cfg), sampler_name=sampler, scheduler=scheduler, seed=int(seed), randomize_seed=bool(randomize), gen_budget=float(budget))
+def _profile_from_values(
+    mode: str,
+    prompt: str,
+    edit_prompt: str,
+    width: int,
+    height: int,
+    target_mp: float,
+    grounding: int,
+    ref_boost: float,
+    ref_boost_a: float,
+    steps: int,
+    cfg: float,
+    sampler: str,
+    scheduler: str,
+    seed: int,
+    randomize: bool,
+    budget: float,
+    base_model: str = DEFAULT_BASE_MODEL,
+    catalog_loras: list[dict[str, Any]] | None = None,
+    custom_loras: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return build_settings(
+        mode=mode,
+        prompt=prompt,
+        edit_prompt=edit_prompt,
+        width=int(width),
+        height=int(height),
+        target_megapixels=float(target_mp),
+        grounding_px=int(grounding),
+        ref_boost=float(ref_boost),
+        ref_boost_a=float(ref_boost_a),
+        steps=int(steps),
+        cfg=float(cfg),
+        sampler_name=sampler,
+        scheduler=scheduler,
+        seed=int(seed),
+        randomize_seed=bool(randomize),
+        gen_budget=float(budget),
+        base_model=base_model,
+        catalog_loras=catalog_loras,
+        custom_loras=custom_loras,
+    )
 
 
 def create_ui() -> gr.Blocks:
@@ -472,6 +829,11 @@ def create_ui() -> gr.Blocks:
         with gr.Row():
             with gr.Column(scale=1):
                 mode = gr.Radio(["text2image", "edit"], value="text2image", label="mode")
+                base_model = gr.Dropdown(
+                    choices=[(item["label"], filename) for filename, item in BASE_MODELS.items()],
+                    value=DEFAULT_BASE_MODEL,
+                    label="base Krea checkpoint",
+                )
                 with gr.Column(visible=False) as image_inputs:
                     primary = gr.Image(type="filepath", label="primary image / scene")
                     second = gr.Image(type="filepath", label="optional second reference")
@@ -486,6 +848,55 @@ def create_ui() -> gr.Blocks:
                     grounding = gr.Slider(384, 1536, value=DEFAULT_GROUNDING, step=32, label="grounding resolution")
                     ref_boost = gr.Slider(0.0, 12.0, value=DEFAULT_REF_BOOST, step=0.1, label="primary reference strength")
                     ref_boost_a = gr.Slider(0.0, 12.0, value=DEFAULT_REF_BOOST, step=0.1, label="second reference strength")
+                with gr.Accordion(f"LoRAs ({len(_lora_catalog)} available)", open=False):
+                    gr.Markdown(
+                        "Set a weight other than zero to enable a catalog LoRA. "
+                        "Enabled catalog entries are stacked in catalog order, followed "
+                        "by custom rows. Negative weights are supported for sliders."
+                    )
+                    with gr.Row():
+                        lora_search = gr.Textbox(
+                            label="search catalog LoRAs",
+                            placeholder="title, trigger word, tag, or category",
+                            lines=1,
+                        )
+                        lora_category = gr.Dropdown(
+                            choices=["all"] + sorted({str(item.get("category", "uncategorized")) for item in _lora_catalog}),
+                            value="all",
+                            label="category",
+                        )
+                    lora_slider_map: dict[str, gr.Slider] = {}
+                    for item in _lora_catalog:
+                        filename = str(item.get("hf_filename", ""))
+                        if not filename:
+                            continue
+                        title = str(item.get("title", filename))
+                        category = str(item.get("category", "uncategorized"))
+                        triggers = ", ".join(str(value) for value in item.get("trigger_words", [])[:3])
+                        label = f"[{category}] {title}"
+                        if triggers:
+                            label += f" — {triggers}"
+                        lora_slider_map[filename] = gr.Slider(
+                            minimum=-3.0,
+                            maximum=3.0,
+                            value=0.0,
+                            step=0.05,
+                            label=label,
+                        )
+                    custom_loras = gr.Dataframe(
+                        headers=["repo_id", "filename", "revision", "weight"],
+                        datatype=["str", "str", "str", "number"],
+                        value=[],
+                        row_count=(0, "dynamic"),
+                        col_count=(4, "fixed"),
+                        type="array",
+                        label="custom Hugging Face LoRAs",
+                        interactive=True,
+                    )
+                    gr.Markdown(
+                        "Custom rows use `repo_id`, `filename`, optional `revision`, and `weight`. "
+                        "Private repositories use `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN`."
+                    )
                 with gr.Accordion("sampling", open=False):
                     steps = gr.Slider(4, 40, value=DEFAULT_STEPS, step=1, label="steps")
                     cfg = gr.Slider(1.0, 5.0, value=DEFAULT_CFG, step=0.1, label="CFG")
@@ -516,14 +927,92 @@ def create_ui() -> gr.Blocks:
 
         mode.change(on_mode_change, inputs=[mode], outputs=[image_inputs, t2i_resolution, edit_controls, edit_prompt])
 
-        generation_inputs = [mode, prompt, edit_prompt, primary, second, width, height, target_mp, grounding, ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed, randomize, gen_budget]
-        button.click(generate, inputs=generation_inputs, outputs=[gallery, status, used_seed])
+        all_lora_filenames = list(lora_slider_map.keys())
+        all_lora_sliders = list(lora_slider_map.values())
 
-        profile_inputs = [mode, prompt, edit_prompt, width, height, target_mp, grounding, ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed, randomize, gen_budget, profile_name]
+        def _filter_lora_sliders(search_text: str, category: str):
+            search = (search_text or "").strip().lower()
+            selected_category = (category or "all").strip()
+            updates = []
+            for item, filename in zip(_lora_catalog, all_lora_filenames):
+                searchable = " ".join([
+                    str(item.get("title", "")),
+                    str(item.get("category", "")),
+                    " ".join(str(value) for value in item.get("tags", [])),
+                    " ".join(str(value) for value in item.get("trigger_words", [])),
+                    filename,
+                ]).lower()
+                visible = (
+                    (selected_category == "all" or item.get("category", "uncategorized") == selected_category)
+                    and (not search or search in searchable)
+                )
+                updates.append(gr.update(visible=visible))
+            return updates
+
+        lora_search.change(
+            _filter_lora_sliders,
+            inputs=[lora_search, lora_category],
+            outputs=all_lora_sliders,
+        )
+        lora_category.change(
+            _filter_lora_sliders,
+            inputs=[lora_search, lora_category],
+            outputs=all_lora_sliders,
+        )
+
+        def _catalog_weights(values: list[Any]) -> dict[str, float]:
+            return {
+                filename: float(weight)
+                for filename, weight in zip(all_lora_filenames, values)
+                if weight and abs(float(weight)) > 1e-6
+            }
+
+        def _generate_wrapper(*values):
+            base_values = values[:18]
+            base_model_value = values[18]
+            custom_rows = values[19]
+            lora_weights = _catalog_weights(values[20:])
+            return generate(
+                *base_values,
+                base_model=base_model_value,
+                lora_weights=lora_weights,
+                custom_loras=custom_rows,
+            )
+
+        generation_inputs = [
+            mode, prompt, edit_prompt, primary, second, width, height, target_mp,
+            grounding, ref_boost, ref_boost_a, steps, cfg, sampler, scheduler,
+            seed, randomize, gen_budget, base_model, custom_loras, *all_lora_sliders,
+        ]
+        button.click(_generate_wrapper, inputs=generation_inputs, outputs=[gallery, status, used_seed])
+
+        profile_inputs = [
+            mode, prompt, edit_prompt, width, height, target_mp, grounding,
+            ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed,
+            randomize, gen_budget, base_model, custom_loras, *all_lora_sliders,
+            profile_name,
+        ]
 
         def export_profile(*values):
-            data = _profile_from_values(*values[:-1])
-            name = re.sub(r"[^A-Za-z0-9_-]", "_", str(values[-1] or "krea2"))[:40]
+            name_value = str(values[-1] or "krea2")
+            catalog = [
+                {"hf_filename": filename, "weight": float(weight or 0.0)}
+                for filename, weight in zip(all_lora_filenames, values[18:-1])
+                if weight and abs(float(weight)) > 1e-6
+            ]
+            normalized_custom, warnings = normalize_custom_loras(values[17])
+            if warnings:
+                return None, "settings export failed — " + "; ".join(warnings)
+            try:
+                data = _profile_from_values(
+                    *values[:16],
+                    values[16],
+                    catalog,
+                    normalized_custom,
+                )
+            except (TypeError, ValueError) as exc:
+                return None, f"settings export failed — {exc}"
+            name = re.sub(r"[^A-Za-z0-9_-]", "_", name_value)[:40]
             handle = tempfile.NamedTemporaryFile(prefix=f"{name}_", suffix=".json", mode="w", encoding="utf-8", delete=False)
             json.dump(data, handle, indent=2)
             handle.close()
@@ -532,13 +1021,13 @@ def create_ui() -> gr.Blocks:
         export_button.click(export_profile, inputs=profile_inputs, outputs=[export_file, profile_status]).then(lambda: gr.update(visible=True), outputs=[export_file])
 
         settings_outputs = [
-            mode, prompt, edit_prompt, width, height, target_mp, grounding,
+            mode, base_model, prompt, edit_prompt, width, height, target_mp, grounding,
             ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed,
-            randomize, gen_budget, profile_status, image_inputs,
+            randomize, gen_budget, custom_loras, *all_lora_sliders, profile_status, image_inputs,
             t2i_resolution, edit_controls,
         ]
         settings_keys = [
-            "mode", "prompt", "edit_prompt", "width", "height",
+            "mode", "base_model", "prompt", "edit_prompt", "width", "height",
             "target_megapixels", "grounding_px", "ref_boost", "ref_boost_a",
             "steps", "cfg", "sampler_name", "scheduler", "effective_seed",
             "randomize_seed", "gen_budget",
@@ -550,10 +1039,45 @@ def create_ui() -> gr.Blocks:
             for key in settings_keys:
                 if key not in data:
                     updates.append(gr.update())
+                elif key == "base_model" and data[key] not in BASE_MODELS:
+                    warnings.append(f"ignored unsupported base model: {data[key]!r}")
+                    updates.append(gr.update())
                 elif key == "edit_prompt" and "mode" in data:
                     updates.append(gr.update(value=data[key], visible=editing))
                 else:
                     updates.append(gr.update(value=data[key]))
+            custom_rows: list[list[Any]] = []
+            if "custom_loras" in data:
+                for row in data.get("custom_loras", []) or []:
+                    try:
+                        normalized = validate_custom_lora(row)
+                    except ValueError as exc:
+                        warnings.append(f"ignored custom LoRA: {exc}")
+                        continue
+                    custom_rows.append([
+                        normalized["repo_id"], normalized["filename"],
+                        normalized["revision"], normalized["weight"],
+                    ])
+            updates.append(gr.update(value=custom_rows) if "custom_loras" in data else gr.update())
+            catalog_values = {filename: 0.0 for filename in all_lora_filenames}
+            for row in data.get("catalog_loras", []) or []:
+                if not isinstance(row, dict):
+                    warnings.append("ignored malformed catalog LoRA entry")
+                    continue
+                filename = str(row.get("hf_filename", ""))
+                if filename not in catalog_values:
+                    warnings.append(f"catalog LoRA not found: {filename}")
+                    continue
+                try:
+                    weight = float(row.get("weight", 0.0))
+                except (TypeError, ValueError):
+                    warnings.append(f"ignored invalid catalog LoRA weight: {filename}")
+                    continue
+                if not -3.0 <= weight <= 3.0:
+                    warnings.append(f"ignored out-of-range catalog LoRA weight: {filename}")
+                    continue
+                catalog_values[filename] = weight
+            updates.extend(gr.update(value=catalog_values[filename]) for filename in all_lora_filenames)
             message = error or ("settings loaded" if not warnings else "; ".join(warnings[:6]))
             if len(warnings) > 6:
                 message += f" (+{len(warnings) - 6} more)"
@@ -597,6 +1121,7 @@ def _on_startup() -> None:
 
 
 _on_startup()
+_load_lora_catalog()
 demo = create_ui()
 demo.queue()
 

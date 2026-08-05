@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 os.environ["KREA_SKIP_STARTUP"] = "1"
 sys.path.insert(0, os.path.dirname(__file__))
@@ -27,8 +30,8 @@ class WorkflowTests(unittest.TestCase):
             seed=42,
         )
         self.assertEqual(workflow["1"]["inputs"]["unet_name"], app.CUSTOM_KREA_FILE)
-        self.assertEqual(app.DOWNLOADS[0][0], "mpasila/Krea-2-Models")
-        self.assertEqual(app.DOWNLOADS[0][1], app.CUSTOM_KREA_FILE)
+        self.assertEqual(app.BASE_MODELS[app.CUSTOM_KREA_FILE]["repo"], "mpasila/Krea-2-Models")
+        self.assertIn(app.MUSE_KREA_FILE, app.BASE_MODELS)
         self.assertEqual(workflow["2"]["inputs"]["clip_name"], "qwen3vl_4b_fp8_scaled.safetensors")
         self.assertEqual(workflow["5"]["inputs"]["text"], "a blue glass sculpture")
         self.assertEqual(workflow["7"]["inputs"]["height"], 768)
@@ -47,6 +50,79 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("source_latent_b", workflow["9"]["inputs"])
         self.assertNotIn("source_image_b", workflow["9"]["inputs"])
         self.assertNotIn("image_b", workflow["10"]["inputs"])
+
+    def test_text_to_image_supports_selected_model_and_ordered_loras(self):
+        workflow = app._t2i_workflow(app.MUSE_KREA_FILE)
+        app._inject_t2i(
+            workflow,
+            prompt="a portrait",
+            width=1024,
+            height=1024,
+            steps=8,
+            cfg=1.0,
+            sampler="euler",
+            scheduler="beta",
+            seed=7,
+            enabled_loras=[("krea2/first.safetensors", 0.5), ("huggingface/second.safetensors", -0.25)],
+        )
+        self.assertEqual(workflow["1"]["inputs"]["unet_name"], app.MUSE_KREA_FILE)
+        self.assertEqual(workflow["user_lora_0"]["inputs"]["model"], ["1", 0])
+        self.assertEqual(workflow["user_lora_1"]["inputs"]["model"], ["user_lora_0", 0])
+        self.assertEqual(workflow["4"]["inputs"]["model"], ["user_lora_1", 0])
+        self.assertEqual(workflow["5"]["inputs"]["clip"], ["user_lora_1", 1])
+
+    def test_edit_user_loras_follow_identity_adapter(self):
+        workflow = app._edit_workflow(False, app.MUSE_KREA_FILE)
+        app._inject_edit(
+            workflow,
+            primary_name="source.png",
+            second_name=None,
+            width=1024,
+            height=1024,
+            edit_prompt="change the shirt",
+            grounding_px=768,
+            ref_boost=1.0,
+            ref_boost_a=1.0,
+            steps=8,
+            cfg=1.0,
+            sampler="euler",
+            scheduler="beta",
+            seed=7,
+            enabled_loras=[("krea2/style.safetensors", 1.0)],
+        )
+        self.assertEqual(workflow["5"]["inputs"]["unet_name"], app.MUSE_KREA_FILE)
+        self.assertEqual(workflow["user_lora_0"]["inputs"]["model"], ["6", 0])
+        self.assertEqual(workflow["9"]["inputs"]["model"], ["user_lora_0", 0])
+        self.assertEqual(workflow["10"]["inputs"]["clip"], ["user_lora_0", 1])
+        self.assertEqual(workflow["6"]["class_type"], "LoraLoaderModelOnly")
+
+    def test_custom_lora_download_uses_managed_namespace(self):
+        original_root = app.LORA_ROOT
+        original_custom_root = app.CUSTOM_LORA_DEST_DIR
+        with tempfile.TemporaryDirectory() as directory:
+            app.LORA_ROOT = Path(directory) / "loras"
+            app.CUSTOM_LORA_DEST_DIR = app.LORA_ROOT / "huggingface"
+
+            def fake_download(**kwargs):
+                destination = Path(kwargs["local_dir"]) / kwargs["filename"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"test")
+                return str(destination)
+
+            try:
+                with patch.object(app, "hf_hub_download", side_effect=fake_download):
+                    relative = app._ensure_custom_lora({
+                        "repo_id": "org/repo",
+                        "filename": "sub/style.safetensors",
+                        "revision": "main",
+                        "weight": 0.8,
+                    })
+            finally:
+                app.LORA_ROOT = original_root
+                app.CUSTOM_LORA_DEST_DIR = original_custom_root
+
+        self.assertTrue(relative.startswith("huggingface/"))
+        self.assertTrue(relative.endswith("/sub/style.safetensors"))
 
     def test_mode_validation(self):
         with self.assertRaises(ValueError):

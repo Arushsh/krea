@@ -12,7 +12,9 @@ from settings_utils import (
     APP_ID,
     build_settings,
     extract_image_settings,
+    normalize_custom_loras,
     parse_settings_text,
+    validate_custom_lora,
     write_png_metadata,
 )
 
@@ -37,6 +39,14 @@ class SettingsTests(unittest.TestCase):
             randomize_seed=False,
             gen_budget=0,
             effective_seed=2,
+            base_model="pornmasterKrea2_v2TurboInt8.safetensors",
+            catalog_loras=[{"hf_filename": "slider.safetensors", "weight": 0.8}],
+            custom_loras=[{
+                "repo_id": "org/repo",
+                "filename": "custom.safetensors",
+                "revision": "main",
+                "weight": 0.5,
+            }],
         )
 
     def test_png_metadata_round_trip(self):
@@ -50,6 +60,9 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(loaded["app"], APP_ID)
         self.assertEqual(loaded["edit_prompt"], "change the coat to blue")
         self.assertEqual(loaded["ref_boost"], 1.0)
+        self.assertEqual(loaded["base_model"], "pornmasterKrea2_v2TurboInt8.safetensors")
+        self.assertEqual(loaded["catalog_loras"][0]["weight"], 0.8)
+        self.assertEqual(loaded["custom_loras"][0]["repo_id"], "org/repo")
         self.assertEqual(warnings, [])
 
     def test_json_profile_round_trip(self):
@@ -57,6 +70,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(parsed["mode"], "edit")
         self.assertEqual(parsed["grounding_px"], 768)
+        self.assertEqual(parsed["custom_loras"][0]["filename"], "custom.safetensors")
 
     def test_a1111_parameter_text(self):
         parsed, warnings = parse_settings_text(
@@ -66,6 +80,22 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(parsed["prompt"], "a portrait")
         self.assertEqual(parsed["width"], 512)
         self.assertEqual(parsed["effective_seed"], 7)
+
+    def test_custom_lora_validation_blocks_unsafe_rows(self):
+        valid = validate_custom_lora(["org/repo", "sub/style.safetensors", "main", 0.8])
+        self.assertEqual(valid["filename"], "sub/style.safetensors")
+        normalized, warnings = normalize_custom_loras([
+            ["", "", "", 0],
+            ["org/repo", "../escape.safetensors", "", 1],
+        ])
+        self.assertEqual(normalized, [])
+        self.assertEqual(len(warnings), 1)
+        with self.assertRaises(ValueError):
+            validate_custom_lora({
+                "repo_id": "not-a-repo",
+                "filename": "style.safetensors",
+                "weight": 0.5,
+            })
 
 
 if __name__ == "__main__":

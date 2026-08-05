@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
+import pathlib
 import re
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,11 @@ from PIL import Image, PngImagePlugin
 
 
 APP_ID = "krea-2-turbo-i2i"
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
+CUSTOM_LORA_EXTENSIONS = {".safetensors", ".pt", ".ckpt", ".bin"}
+_HF_REPO_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+)
 
 
 def _finite_number(value: Any, field: str) -> float:
@@ -30,6 +36,90 @@ def _text(value: Any, field: str, limit: int = 8192) -> str:
     if "\x00" in result or len(result) > limit:
         raise ValueError(f"{field} is invalid or too long")
     return result.strip()
+
+
+def _finite_number(value: Any, field: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be finite")
+    return number
+
+
+def validate_custom_lora(row: Any) -> dict[str, Any]:
+    """Validate and normalize one custom Hugging Face LoRA row."""
+    if isinstance(row, dict):
+        repo_id = row.get("repo_id", "")
+        filename = row.get("filename", row.get("file", ""))
+        revision = row.get("revision", "")
+        weight = row.get("weight", 0.0)
+    elif isinstance(row, (list, tuple)):
+        values = list(row) + [""] * 4
+        repo_id, filename, revision, weight = values[:4]
+    else:
+        raise ValueError("custom LoRA rows must be objects or four-column arrays")
+
+    repo_id = _text(repo_id, "custom LoRA repository", 193)
+    if not _HF_REPO_RE.fullmatch(repo_id):
+        raise ValueError(
+            f"invalid Hugging Face repository ID {repo_id!r}; expected namespace/name"
+        )
+
+    filename = _text(filename, "custom LoRA file", 512).replace("\\", "/")
+    path = pathlib.PurePosixPath(filename)
+    if (
+        not filename
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.suffix.lower() not in CUSTOM_LORA_EXTENSIONS
+    ):
+        allowed = ", ".join(sorted(CUSTOM_LORA_EXTENSIONS))
+        raise ValueError(f"custom LoRA file must be relative and end in {allowed}")
+
+    revision = _text(revision, "custom LoRA revision", 256)
+    if any(ord(char) < 32 for char in revision):
+        raise ValueError("custom LoRA revision contains control characters")
+
+    weight_number = _finite_number(weight or 0.0, "custom LoRA weight")
+    if weight_number < -3.0 or weight_number > 3.0:
+        raise ValueError("custom LoRA weight must be between -3 and 3")
+
+    return {
+        "repo_id": repo_id,
+        "filename": filename,
+        "revision": revision,
+        "weight": round(weight_number, 6),
+    }
+
+
+def normalize_custom_loras(rows: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Normalize non-empty custom rows and collect row errors as warnings."""
+    if rows is None:
+        return [], []
+    if isinstance(rows, dict):
+        rows = [rows]
+    normalized: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for index, row in enumerate(rows):
+        if row is None or row == [] or row == {}:
+            continue
+        if isinstance(row, (list, tuple)):
+            values = list(row) + [""] * 4
+            if not any(str(value).strip() for value in values[:3]) and not values[3]:
+                continue
+        try:
+            normalized.append(validate_custom_lora(row))
+        except ValueError as exc:
+            warnings.append(f"custom LoRA row {index + 1}: {exc}")
+    return normalized, warnings
+
+
+def stable_custom_lora_namespace(repo_id: str, filename: str, revision: str = "") -> str:
+    """Return a filesystem-safe stable namespace for one remote LoRA."""
+    identity = "\x00".join((repo_id, revision, filename)).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:20]
 
 
 def build_settings(
@@ -51,11 +141,15 @@ def build_settings(
     randomize_seed: bool,
     gen_budget: float,
     effective_seed: int | None = None,
+    base_model: str = "",
+    catalog_loras: list[dict[str, Any]] | None = None,
+    custom_loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical profile embedded in generated PNG files."""
     return {
         "app": APP_ID,
         "schema_version": PROFILE_SCHEMA_VERSION,
+        "base_model": _text(base_model, "base model", 256),
         "mode": _text(mode, "mode", 32),
         "prompt": _text(prompt, "prompt"),
         "edit_prompt": _text(edit_prompt, "edit prompt"),
@@ -73,6 +167,15 @@ def build_settings(
         "effective_seed": None if effective_seed is None else int(effective_seed),
         "randomize_seed": bool(randomize_seed),
         "gen_budget": float(gen_budget),
+        "catalog_loras": [
+            {
+                "hf_filename": _text(item.get("hf_filename", ""), "catalog LoRA filename", 512),
+                "weight": float(item.get("weight", 0.0)),
+            }
+            for item in (catalog_loras or [])
+            if item.get("hf_filename") and abs(float(item.get("weight", 0.0))) > 1e-6
+        ],
+        "custom_loras": [validate_custom_lora(item) for item in (custom_loras or [])],
     }
 
 
@@ -143,6 +246,7 @@ def build_parameters_text(settings: dict[str, Any]) -> str:
     """Build a readable generation summary for image viewers."""
     prompt = settings.get("edit_prompt") or settings.get("prompt", "")
     parts = [
+        f"Base model: {settings.get('base_model', '')}",
         f"Steps: {settings.get('steps')}",
         f"CFG scale: {settings.get('cfg')}",
         f"Sampler: {settings.get('sampler_name')}",
@@ -156,6 +260,15 @@ def build_parameters_text(settings: dict[str, Any]) -> str:
             f"Reference strength: {settings.get('ref_boost')}",
             f"Second reference strength: {settings.get('ref_boost_a')}",
         ])
+    lora_tags = []
+    for item in settings.get("catalog_loras", []):
+        name = pathlib.PurePosixPath(str(item.get("hf_filename", ""))).stem
+        lora_tags.append(f"{name}:{float(item.get('weight', 0.0)):g}")
+    for item in settings.get("custom_loras", []):
+        name = pathlib.PurePosixPath(str(item.get("filename", ""))).stem
+        lora_tags.append(f"{name}:{float(item.get('weight', 0.0)):g}")
+    if lora_tags:
+        parts.append("LoRAs: " + ", ".join(lora_tags))
     return f"{prompt}\n" + ", ".join(parts)
 
 
