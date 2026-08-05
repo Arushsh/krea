@@ -29,12 +29,12 @@ in that mode.
 ## Models
 
 The text encoder and VAE are downloaded from the ungated [Comfy-Org/Krea-2 mirror](https://huggingface.co/Comfy-Org/Krea-2).
-The Space uses the custom [museByStableYogi Krea 2 Turbo checkpoint](https://huggingface.co/mpasila/Krea-2-Models/resolve/main/museByStableYogi_v25EXTENDEDTURBO.safetensors)
+The Space uses the custom [PornMaster Krea 2 Turbo checkpoint](https://huggingface.co/mpasila/Krea-2-Models/resolve/main/pornmasterKrea2_v2TurboInt8.safetensors)
 instead of the official Krea 2 Turbo diffusion checkpoint:
 
 | File | Role |
 |------|------|
-| `museByStableYogi_v25EXTENDEDTURBO.safetensors` | museByStableYogi Krea 2 Turbo diffusion model |
+| `pornmasterKrea2_v2TurboInt8.safetensors` | PornMaster Krea 2 Turbo diffusion model |
 | `qwen3vl_4b_fp8_scaled.safetensors` | Krea 2 Qwen3-VL text encoder |
 | `qwen_image_vae.safetensors` | Krea 2 VAE |
 
