@@ -103,6 +103,9 @@ SCHEDULERS = ["beta", "normal", "karras", "exponential", "sgm_uniform", "simple"
 DEFAULT_WIDTH = 1024
 DEFAULT_HEIGHT = 1024
 DEFAULT_TARGET_MP = 1.4
+MAX_WIDTH = 2048
+MAX_HEIGHT = 2048
+MAX_TARGET_MP = 4.0
 DEFAULT_GROUNDING = 768
 DEFAULT_REF_BOOST = 1.0
 DEFAULT_STEPS = 8
@@ -465,12 +468,12 @@ def _prepare_edit_image(path: str, target_megapixels: float) -> tuple[str, int, 
     """Resize the primary source to a 64-pixel grid while preserving its AR."""
     with Image.open(path) as source:
         image = source.convert("RGB")
-        megapixels = max(0.25, min(2.0, float(target_megapixels)))
+        megapixels = max(0.25, min(MAX_TARGET_MP, float(target_megapixels)))
         scale = (megapixels * 1_000_000 / max(1, image.width * image.height)) ** 0.5
         width = max(64, int(round(image.width * scale / 64) * 64))
         height = max(64, int(round(image.height * scale / 64) * 64))
-        width = min(2048, width)
-        height = min(2048, height)
+        width = min(MAX_WIDTH, width)
+        height = min(MAX_HEIGHT, height)
         image = image.resize((width, height), Image.Resampling.LANCZOS)
         name = f"input_{uuid.uuid4().hex[:12]}.png"
         image.save(INPUT / name, format="PNG")
@@ -694,8 +697,8 @@ def generate(
             enabled_loras.append((_ensure_custom_lora(row), float(row["weight"])))
 
         if mode == "text2image":
-            width = max(512, min(1536, int(width) // 64 * 64))
-            height = max(512, min(1536, int(height) // 64 * 64))
+            width = max(512, min(MAX_WIDTH, int(width) // 64 * 64))
+            height = max(512, min(MAX_HEIGHT, int(height) // 64 * 64))
             workflow = _t2i_workflow(base_model)
         else:
             primary_name, width, height = _prepare_edit_image(primary_image, target_megapixels)
@@ -841,10 +844,10 @@ def create_ui() -> gr.Blocks:
                 edit_prompt = gr.Textbox(label="edit instruction", lines=3, visible=False, placeholder="recolor the jacket to matte black")
                 with gr.Column() as t2i_resolution:
                     with gr.Row():
-                        width = gr.Slider(512, 1536, value=DEFAULT_WIDTH, step=64, label="width")
-                        height = gr.Slider(512, 1536, value=DEFAULT_HEIGHT, step=64, label="height")
+                        width = gr.Slider(512, MAX_WIDTH, value=DEFAULT_WIDTH, step=64, label="width")
+                        height = gr.Slider(512, MAX_HEIGHT, value=DEFAULT_HEIGHT, step=64, label="height")
                 with gr.Column(visible=False) as edit_controls:
-                    target_mp = gr.Slider(0.25, 2.0, value=DEFAULT_TARGET_MP, step=0.05, label="target megapixels")
+                    target_mp = gr.Slider(0.25, MAX_TARGET_MP, value=DEFAULT_TARGET_MP, step=0.05, label="target megapixels")
                     grounding = gr.Slider(384, 1536, value=DEFAULT_GROUNDING, step=32, label="grounding resolution")
                     ref_boost = gr.Slider(0.0, 12.0, value=DEFAULT_REF_BOOST, step=0.1, label="primary reference strength")
                     ref_boost_a = gr.Slider(0.0, 12.0, value=DEFAULT_REF_BOOST, step=0.1, label="second reference strength")
