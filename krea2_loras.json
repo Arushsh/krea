@@ -340,6 +340,25 @@
       ],
       "strength": null,
       "description": "I decided to port my WAN 2.2 14B LORA to FLUX KLEIN 9B.\n\nI think it performs OK although the usual KLEIN issues do persist.\n\nSeems to work well in edit mode.\n\nAs per original V1 this is mostly lighter complexions"
+    },
+    {
+      "id": 2605595,
+      "title": "[Krea2 / ZIT] Japanese Woman Face 01",
+      "url": "https://civitai.red/models/2605595/krea2-zit-japanese-woman-face-01?modelVersionId=3104311",
+      "download_url": "https://civitai.red/api/download/models/3104311?fileId=2984083",
+      "hf_filename": "krea2_JPwoman01_v01.safetensors",
+      "category": "style",
+      "tags": [
+        "japanese",
+        "face",
+        "woman",
+        "character"
+      ],
+      "trigger_words": [
+        "jpwmn01"
+      ],
+      "strength": "0.8",
+      "description": "Krea2 turbo\n\nUploaded as Version 0.1 for testing Krea2 LoRA generation.\nZ-Image turbo\n\nUploaded as Version 0.1 for testing ZIT LoRA generation. All sample images were generated using Z-Image Power Nodes, with FlashVSR used as the detail enhancer.\nUsage\n\n    Trigger word: jpwmn01\n\n    Recommended model strength: 1.0 (ZIT), 0.8 (Krea2)\n\n    CLIP/Text Encoder connection is not required.\n\nDisclaimer\n\n    This model is intended for creating the faces of fictional adult Japanese women.\n\n    This model does not depict any real person.\n\n    The creator assumes no responsibility for generated content or misuse of this model.\n\n    Users are solely responsible for the content they generate with this model.\n\nTraining Information\n\n    Trained with AI-Toolkit using 17 images for 600 steps on an RTX 3060.\n\n    This LoRA was trained as UNet-only. CLIP / Text Encoder training was disabled.\n\n私の初めてのLoRA作成は、こちらのYouTube動画を参考にしました。（日本人向け）\n\nダルトワ★TVさんありがとうございます。"
     }
   ]
 }
