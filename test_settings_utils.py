@@ -14,6 +14,7 @@ from settings_utils import (
     extract_image_settings,
     normalize_custom_loras,
     parse_settings_text,
+    validate_custom_base_model,
     validate_custom_lora,
     write_png_metadata,
 )
@@ -48,6 +49,43 @@ class SettingsTests(unittest.TestCase):
                 "weight": 0.5,
             }],
         )
+
+    def test_custom_base_model_is_preserved_in_settings(self):
+        settings = build_settings(
+            mode="text2image",
+            prompt="a landscape",
+            edit_prompt="",
+            width=1024,
+            height=1024,
+            target_megapixels=1.4,
+            grounding_px=768,
+            ref_boost=1.0,
+            ref_boost_a=1.0,
+            steps=8,
+            cfg=1.0,
+            sampler_name="euler",
+            scheduler="beta",
+            seed=2,
+            randomize_seed=False,
+            gen_budget=0,
+            base_model="__custom_huggingface_base_model__",
+            custom_base_model={
+                "repo_id": "org/repo",
+                "filename": "models/base.safetensors",
+                "revision": "main",
+            },
+        )
+        self.assertEqual(settings["custom_base_model"]["repo_id"], "org/repo")
+        self.assertEqual(settings["custom_base_model"]["filename"], "models/base.safetensors")
+
+    def test_custom_base_model_validation_blocks_unsafe_paths(self):
+        valid = validate_custom_base_model(["org/repo", "base.safetensors", "main"])
+        self.assertEqual(valid["filename"], "base.safetensors")
+        with self.assertRaises(ValueError):
+            validate_custom_base_model({
+                "repo_id": "org/repo",
+                "filename": "../escape.safetensors",
+            })
 
     def test_png_metadata_round_trip(self):
         settings = self.settings()

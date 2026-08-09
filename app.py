@@ -46,7 +46,9 @@ from settings_utils import (
     extract_image_settings,
     normalize_custom_loras,
     parse_settings_text,
+    stable_custom_base_model_namespace,
     stable_custom_lora_namespace,
+    validate_custom_base_model,
     validate_custom_lora,
     write_png_metadata,
 )
@@ -67,6 +69,7 @@ CUSTOM_KREA_REPO = "mpasila/Krea-2-Models"
 CUSTOM_KREA_FILE = "pornmasterKrea2_v2TurboInt8.safetensors"
 MUSE_KREA_FILE = "museByStableYogi_v25EXTENDEDTURBO.safetensors"
 DEFAULT_BASE_MODEL = CUSTOM_KREA_FILE
+CUSTOM_BASE_MODEL = "__custom_huggingface_base_model__"
 BASE_MODELS = {
     MUSE_KREA_FILE: {
         "label": "Muse By Stable Yogi Krea2",
@@ -264,8 +267,8 @@ def _load_lora_catalog() -> None:
     print(f"[lora] loaded {len(_lora_catalog)} Krea LoRAs", flush=True)
 
 
-def _ensure_base_model(base_model: str, progress: gr.Progress | None = None) -> None:
-    """Download the selected approved base checkpoint if it is not cached."""
+def _ensure_base_model(base_model: str, progress: gr.Progress | None = None) -> str:
+    """Download an approved base checkpoint and return its ComfyUI name."""
     if base_model not in BASE_MODELS:
         raise ValueError("unsupported Krea base model")
     item = BASE_MODELS[base_model]
@@ -275,20 +278,82 @@ def _ensure_base_model(base_model: str, progress: gr.Progress | None = None) -> 
         MODELS / "diffusion_models" / item["filename"],
         item["label"],
     )
+    return base_model
+
+
+def _ensure_custom_base_model(value: dict[str, Any]) -> str:
+    """Download a validated custom HF base model into a managed ComfyUI folder."""
+    normalized = validate_custom_base_model(value)
+    namespace = stable_custom_base_model_namespace(
+        normalized["repo_id"], normalized["filename"], normalized["revision"]
+    )
+    diffusion_root = MODELS / "diffusion_models"
+    destination_dir = diffusion_root / "huggingface" / namespace
+    relative_file = pathlib.PurePosixPath(normalized["filename"])
+    destination = destination_dir.joinpath(*relative_file.parts)
+    if destination.exists():
+        relative = destination.resolve().relative_to(diffusion_root.resolve())
+        return pathlib.PurePosixPath(*relative.parts).as_posix()
+
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    kwargs: dict[str, Any] = {
+        "repo_id": normalized["repo_id"],
+        "filename": normalized["filename"],
+        "local_dir": str(destination_dir),
+        "token": token,
+    }
+    if normalized["revision"]:
+        kwargs["revision"] = normalized["revision"]
+    try:
+        downloaded = pathlib.Path(hf_hub_download(**kwargs))
+    except Exception as exc:
+        raise RuntimeError(
+            f"failed to download custom base model "
+            f"{normalized['repo_id']}/{normalized['filename']}: {exc}"
+        ) from exc
+    if not downloaded.exists():
+        raise RuntimeError(f"HF Hub returned a missing custom base-model path: {downloaded}")
+    try:
+        relative = downloaded.resolve().relative_to(diffusion_root.resolve())
+    except ValueError as exc:
+        raise RuntimeError("custom base-model download escaped the managed model directory") from exc
+    print(f"[models] ready: custom base model {normalized['repo_id']}/{normalized['filename']}", flush=True)
+    return pathlib.PurePosixPath(*relative.parts).as_posix()
+
+
+def _resolve_base_model(
+    base_model: str,
+    custom_base_model: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the UI selection to the relative model name expected by ComfyUI."""
+    if base_model == CUSTOM_BASE_MODEL:
+        if not custom_base_model:
+            raise ValueError("enter a custom Hugging Face base-model repository and file")
+        return _ensure_custom_base_model(custom_base_model)
+    if base_model not in BASE_MODELS:
+        raise ValueError("unsupported Krea base model")
+    if custom_base_model:
+        raise ValueError("custom base-model details require the custom model option")
+    return _ensure_base_model(base_model)
 
 
 def _ensure_models(
     base_model: str = DEFAULT_BASE_MODEL,
+    custom_base_model: dict[str, Any] | None = None,
     progress: gr.Progress | None = None,
-) -> None:
+) -> str:
     total = len(DOWNLOADS) + 1
     for index, (repo, filename, destination, label) in enumerate(DOWNLOADS):
         if progress:
             progress(index / total, desc=f"downloading {label}")
         _download_to_dest(repo, filename, destination, label)
+    if base_model == CUSTOM_BASE_MODEL:
+        if progress:
+            progress(len(DOWNLOADS) / total, desc="downloading custom Hugging Face checkpoint")
+        return _resolve_base_model(base_model, custom_base_model)
     if progress:
         progress(len(DOWNLOADS) / total, desc="downloading selected Krea checkpoint")
-    _ensure_base_model(base_model)
+    return _resolve_base_model(base_model)
 
 
 def _ensure_lora(hf_filename: str) -> str:
@@ -368,9 +433,17 @@ def _ref(node: str, output: int = 0) -> list[Any]:
     return [node, output]
 
 
+def _validate_model_name(model_name: str) -> str:
+    """Accept only a relative model name produced by the managed model loader."""
+    normalized = str(model_name).replace("\\", "/")
+    path = pathlib.PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError("invalid Krea base model path")
+    return path.as_posix()
+
+
 def _t2i_workflow(base_model: str = DEFAULT_BASE_MODEL) -> dict[str, Any]:
-    if base_model not in BASE_MODELS:
-        raise ValueError("unsupported Krea base model")
+    base_model = _validate_model_name(base_model)
     cache_key = f"text2image:{base_model}"
     if cache_key in _workflow_cache:
         return json.loads(json.dumps(_workflow_cache[cache_key]))
@@ -395,8 +468,7 @@ def _edit_workflow(
     has_second_reference: bool,
     base_model: str = DEFAULT_BASE_MODEL,
 ) -> dict[str, Any]:
-    if base_model not in BASE_MODELS:
-        raise ValueError("unsupported Krea base model")
+    base_model = _validate_model_name(base_model)
     _read_source_workflow(EDIT_SOURCE)
     workflow: dict[str, Any] = {
         "1": {"class_type": "LoadImage", "inputs": {"image": ""}},
@@ -604,11 +676,13 @@ def _execute_workflow(workflow: dict[str, Any]) -> list[str]:
 
 def _prepare_runtime(
     base_model: str = DEFAULT_BASE_MODEL,
+    custom_base_model: dict[str, Any] | None = None,
     progress: gr.Progress | None = None,
-) -> None:
+) -> str:
     _ensure_comfy()
-    _ensure_models(base_model, progress)
+    resolved_base_model = _ensure_models(base_model, custom_base_model, progress)
     _init_comfy_nodes()
+    return resolved_base_model
 
 
 def get_gpu_duration(*args: Any, **kwargs: Any) -> int:
@@ -621,8 +695,8 @@ def get_gpu_duration(*args: Any, **kwargs: Any) -> int:
     gen_budget = kwargs.get("gen_budget", args[17] if len(args) > 17 else 0)
     if gen_budget and int(gen_budget) > 0:
         return max(MIN_GPU_SECONDS, min(MAX_GPU_SECONDS, int(gen_budget)))
-    lora_weights = kwargs.get("lora_weights", args[19] if len(args) > 19 else {}) or {}
-    custom_loras = kwargs.get("custom_loras", args[20] if len(args) > 20 else []) or []
+    lora_weights = kwargs.get("lora_weights", args[22] if len(args) > 22 else {}) or {}
+    custom_loras = kwargs.get("custom_loras", args[23] if len(args) > 23 else []) or []
     lora_count = sum(
         1 for value in lora_weights.values()
         if value and abs(float(value)) > 1e-6
@@ -659,6 +733,9 @@ def generate(
     randomize_seed: bool,
     gen_budget: float,
     base_model: str = DEFAULT_BASE_MODEL,
+    custom_base_repo: str = "",
+    custom_base_filename: str = "",
+    custom_base_revision: str = "",
     lora_weights: dict[str, float] | None = None,
     custom_loras: list[dict[str, Any]] | None = None,
     progress: gr.Progress = gr.Progress(track_tqdm=True),
@@ -671,9 +748,16 @@ def generate(
         effective_edit_prompt = (edit_prompt or prompt or "").strip()
         if sampler not in SAMPLERS or scheduler not in SCHEDULERS:
             raise ValueError("unsupported sampler or scheduler")
-        if base_model not in BASE_MODELS:
+        custom_base = None
+        if base_model == CUSTOM_BASE_MODEL:
+            custom_base = validate_custom_base_model({
+                "repo_id": custom_base_repo,
+                "filename": custom_base_filename,
+                "revision": custom_base_revision,
+            })
+        elif base_model not in BASE_MODELS:
             raise ValueError("unsupported Krea base model")
-        _prepare_runtime(base_model, progress)
+        resolved_base_model = _prepare_runtime(base_model, custom_base, progress)
 
         enabled_loras: list[tuple[str, float]] = []
         active_catalog: list[dict[str, Any]] = []
@@ -699,14 +783,14 @@ def generate(
         if mode == "text2image":
             width = max(512, min(MAX_WIDTH, int(width) // 64 * 64))
             height = max(512, min(MAX_HEIGHT, int(height) // 64 * 64))
-            workflow = _t2i_workflow(base_model)
+            workflow = _t2i_workflow(resolved_base_model)
         else:
             primary_name, width, height = _prepare_edit_image(primary_image, target_megapixels)
             staged.append(INPUT / primary_name)
             second_name = _stage_image(second_image, "reference") if second_image else None
             if second_name:
                 staged.append(INPUT / second_name)
-            workflow = _edit_workflow(bool(second_name), base_model)
+            workflow = _edit_workflow(bool(second_name), resolved_base_model)
 
         if mode == "text2image":
             _inject_t2i(
@@ -759,6 +843,7 @@ def generate(
             gen_budget=float(gen_budget),
             effective_seed=effective_seed,
             base_model=base_model,
+            custom_base_model=custom_base,
             catalog_loras=active_catalog,
             custom_loras=active_custom,
         )
@@ -800,6 +885,9 @@ def _profile_from_values(
     randomize: bool,
     budget: float,
     base_model: str = DEFAULT_BASE_MODEL,
+    custom_base_repo: str = "",
+    custom_base_filename: str = "",
+    custom_base_revision: str = "",
     catalog_loras: list[dict[str, Any]] | None = None,
     custom_loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -821,6 +909,15 @@ def _profile_from_values(
         randomize_seed=bool(randomize),
         gen_budget=float(budget),
         base_model=base_model,
+        custom_base_model=(
+            validate_custom_base_model({
+                "repo_id": custom_base_repo,
+                "filename": custom_base_filename,
+                "revision": custom_base_revision,
+            })
+            if base_model == CUSTOM_BASE_MODEL
+            else None
+        ),
         catalog_loras=catalog_loras,
         custom_loras=custom_loras,
     )
@@ -833,10 +930,30 @@ def create_ui() -> gr.Blocks:
             with gr.Column(scale=1):
                 mode = gr.Radio(["text2image", "edit"], value="text2image", label="mode")
                 base_model = gr.Dropdown(
-                    choices=[(item["label"], filename) for filename, item in BASE_MODELS.items()],
+                    choices=[
+                        *[(item["label"], filename) for filename, item in BASE_MODELS.items()],
+                        ("Custom Hugging Face base model", CUSTOM_BASE_MODEL),
+                    ],
                     value=DEFAULT_BASE_MODEL,
                     label="base Krea checkpoint",
                 )
+                with gr.Column(visible=False) as custom_base_controls:
+                    custom_base_repo = gr.Textbox(
+                        label="custom base-model Hugging Face repository",
+                        placeholder="namespace/repository",
+                    )
+                    custom_base_filename = gr.Textbox(
+                        label="custom base-model filename",
+                        placeholder="path/to/model.safetensors",
+                    )
+                    custom_base_revision = gr.Textbox(
+                        label="custom base-model revision (optional)",
+                        placeholder="main, tag, or commit hash",
+                    )
+                    gr.Markdown(
+                        "Use a relative `.safetensors`, `.ckpt`, `.pt`, or `.bin` file. "
+                        "Private repositories use `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN`."
+                    )
                 with gr.Column(visible=False) as image_inputs:
                     primary = gr.Image(type="filepath", label="primary image / scene")
                     second = gr.Image(type="filepath", label="optional second reference")
@@ -930,6 +1047,11 @@ def create_ui() -> gr.Blocks:
 
         mode.change(on_mode_change, inputs=[mode], outputs=[image_inputs, t2i_resolution, edit_controls, edit_prompt])
 
+        def on_base_model_change(value: str):
+            return gr.update(visible=value == CUSTOM_BASE_MODEL)
+
+        base_model.change(on_base_model_change, inputs=[base_model], outputs=[custom_base_controls])
+
         all_lora_filenames = list(lora_slider_map.keys())
         all_lora_sliders = list(lora_slider_map.values())
 
@@ -973,11 +1095,17 @@ def create_ui() -> gr.Blocks:
         def _generate_wrapper(*values):
             base_values = values[:18]
             base_model_value = values[18]
-            custom_rows = values[19]
-            lora_weights = _catalog_weights(values[20:])
+            custom_repo = values[19]
+            custom_filename = values[20]
+            custom_revision = values[21]
+            custom_rows = values[22]
+            lora_weights = _catalog_weights(values[23:])
             return generate(
                 *base_values,
                 base_model=base_model_value,
+                custom_base_repo=custom_repo,
+                custom_base_filename=custom_filename,
+                custom_base_revision=custom_revision,
                 lora_weights=lora_weights,
                 custom_loras=custom_rows,
             )
@@ -985,14 +1113,16 @@ def create_ui() -> gr.Blocks:
         generation_inputs = [
             mode, prompt, edit_prompt, primary, second, width, height, target_mp,
             grounding, ref_boost, ref_boost_a, steps, cfg, sampler, scheduler,
-            seed, randomize, gen_budget, base_model, custom_loras, *all_lora_sliders,
+            seed, randomize, gen_budget, base_model, custom_base_repo, custom_base_filename,
+            custom_base_revision, custom_loras, *all_lora_sliders,
         ]
         button.click(_generate_wrapper, inputs=generation_inputs, outputs=[gallery, status, used_seed])
 
         profile_inputs = [
             mode, prompt, edit_prompt, width, height, target_mp, grounding,
             ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed,
-            randomize, gen_budget, base_model, custom_loras, *all_lora_sliders,
+            randomize, gen_budget, base_model, custom_base_repo, custom_base_filename,
+            custom_base_revision, custom_loras, *all_lora_sliders,
             profile_name,
         ]
 
@@ -1000,16 +1130,19 @@ def create_ui() -> gr.Blocks:
             name_value = str(values[-1] or "krea2")
             catalog = [
                 {"hf_filename": filename, "weight": float(weight or 0.0)}
-                for filename, weight in zip(all_lora_filenames, values[18:-1])
+                for filename, weight in zip(all_lora_filenames, values[21:-1])
                 if weight and abs(float(weight)) > 1e-6
             ]
-            normalized_custom, warnings = normalize_custom_loras(values[17])
+            normalized_custom, warnings = normalize_custom_loras(values[20])
             if warnings:
                 return None, "settings export failed — " + "; ".join(warnings)
             try:
                 data = _profile_from_values(
                     *values[:16],
                     values[16],
+                    values[17],
+                    values[18],
+                    values[19],
                     catalog,
                     normalized_custom,
                 )
@@ -1024,34 +1157,50 @@ def create_ui() -> gr.Blocks:
         export_button.click(export_profile, inputs=profile_inputs, outputs=[export_file, profile_status]).then(lambda: gr.update(visible=True), outputs=[export_file])
 
         settings_outputs = [
-            mode, base_model, prompt, edit_prompt, width, height, target_mp, grounding,
+            mode, base_model, custom_base_repo, custom_base_filename, custom_base_revision,
+            prompt, edit_prompt, width, height, target_mp, grounding,
             ref_boost, ref_boost_a, steps, cfg, sampler, scheduler, seed,
             randomize, gen_budget, custom_loras, *all_lora_sliders, profile_status, image_inputs,
-            t2i_resolution, edit_controls,
+            t2i_resolution, edit_controls, custom_base_controls,
         ]
         settings_keys = [
-            "mode", "base_model", "prompt", "edit_prompt", "width", "height",
+            "mode", "base_model", "custom_base_repo", "custom_base_filename", "custom_base_revision",
+            "prompt", "edit_prompt", "width", "height",
             "target_megapixels", "grounding_px", "ref_boost", "ref_boost_a",
             "steps", "cfg", "sampler_name", "scheduler", "effective_seed",
             "randomize_seed", "gen_budget",
         ]
 
         def settings_updates(data: dict[str, Any], warnings: list[str], error: str = ""):
-            editing = data.get("mode") == "edit"
+            view_data = dict(data)
+            custom_base = data.get("custom_base_model")
+            if custom_base:
+                try:
+                    normalized_base = validate_custom_base_model(custom_base)
+                except ValueError as exc:
+                    warnings.append(f"ignored custom base model: {exc}")
+                else:
+                    view_data.update({
+                        "custom_base_repo": normalized_base["repo_id"],
+                        "custom_base_filename": normalized_base["filename"],
+                        "custom_base_revision": normalized_base["revision"],
+                    })
+            editing = view_data.get("mode") == "edit"
+            custom_base_visible = view_data.get("base_model") == CUSTOM_BASE_MODEL
             updates = []
             for key in settings_keys:
-                if key not in data:
+                if key not in view_data:
                     updates.append(gr.update())
-                elif key == "base_model" and data[key] not in BASE_MODELS:
-                    warnings.append(f"ignored unsupported base model: {data[key]!r}")
+                elif key == "base_model" and view_data[key] not in (*BASE_MODELS, CUSTOM_BASE_MODEL):
+                    warnings.append(f"ignored unsupported base model: {view_data[key]!r}")
                     updates.append(gr.update())
-                elif key == "edit_prompt" and "mode" in data:
-                    updates.append(gr.update(value=data[key], visible=editing))
+                elif key == "edit_prompt" and "mode" in view_data:
+                    updates.append(gr.update(value=view_data[key], visible=editing))
                 else:
-                    updates.append(gr.update(value=data[key]))
+                    updates.append(gr.update(value=view_data[key]))
             custom_rows: list[list[Any]] = []
-            if "custom_loras" in data:
-                for row in data.get("custom_loras", []) or []:
+            if "custom_loras" in view_data:
+                for row in view_data.get("custom_loras", []) or []:
                     try:
                         normalized = validate_custom_lora(row)
                     except ValueError as exc:
@@ -1061,9 +1210,9 @@ def create_ui() -> gr.Blocks:
                         normalized["repo_id"], normalized["filename"],
                         normalized["revision"], normalized["weight"],
                     ])
-            updates.append(gr.update(value=custom_rows) if "custom_loras" in data else gr.update())
+            updates.append(gr.update(value=custom_rows) if "custom_loras" in view_data else gr.update())
             catalog_values = {filename: 0.0 for filename in all_lora_filenames}
-            for row in data.get("catalog_loras", []) or []:
+            for row in view_data.get("catalog_loras", []) or []:
                 if not isinstance(row, dict):
                     warnings.append("ignored malformed catalog LoRA entry")
                     continue
@@ -1086,10 +1235,10 @@ def create_ui() -> gr.Blocks:
                 message += f" (+{len(warnings) - 6} more)"
             updates.extend([
                 message,
-                gr.update(visible=editing) if "mode" in data else gr.update(),
-                gr.update(visible=not editing) if "mode" in data else gr.update(),
-                gr.update(visible=editing) if "mode" in data else gr.update(),
-                gr.update(visible=editing) if "mode" in data else gr.update(),
+                gr.update(visible=editing) if "mode" in view_data else gr.update(),
+                gr.update(visible=not editing) if "mode" in view_data else gr.update(),
+                gr.update(visible=editing) if "mode" in view_data else gr.update(),
+                gr.update(visible=custom_base_visible) if "base_model" in view_data else gr.update(),
             ])
             return tuple(updates)
 

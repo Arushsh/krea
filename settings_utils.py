@@ -14,8 +14,9 @@ from PIL import Image, PngImagePlugin
 
 
 APP_ID = "krea-2-turbo-i2i"
-PROFILE_SCHEMA_VERSION = 2
+PROFILE_SCHEMA_VERSION = 3
 CUSTOM_LORA_EXTENSIONS = {".safetensors", ".pt", ".ckpt", ".bin"}
+CUSTOM_BASE_MODEL_EXTENSIONS = {".safetensors", ".pt", ".ckpt", ".bin"}
 _HF_REPO_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
 )
@@ -116,8 +117,49 @@ def normalize_custom_loras(rows: Any) -> tuple[list[dict[str, Any]], list[str]]:
     return normalized, warnings
 
 
+def validate_custom_base_model(value: Any) -> dict[str, str]:
+    """Validate one custom Hugging Face diffusion-model reference."""
+    if isinstance(value, dict):
+        repo_id = value.get("repo_id", "")
+        filename = value.get("filename", value.get("file", ""))
+        revision = value.get("revision", "")
+    elif isinstance(value, (list, tuple)):
+        values = list(value) + [""] * 3
+        repo_id, filename, revision = values[:3]
+    else:
+        raise ValueError("custom base model must be an object or three-column array")
+
+    repo_id = _text(repo_id, "custom base-model repository", 193)
+    if not _HF_REPO_RE.fullmatch(repo_id):
+        raise ValueError(
+            f"invalid Hugging Face repository ID {repo_id!r}; expected namespace/name"
+        )
+
+    filename = _text(filename, "custom base-model file", 512).replace("\\", "/")
+    path = pathlib.PurePosixPath(filename)
+    if (
+        not filename
+        or path.is_absolute()
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.suffix.lower() not in CUSTOM_BASE_MODEL_EXTENSIONS
+    ):
+        allowed = ", ".join(sorted(CUSTOM_BASE_MODEL_EXTENSIONS))
+        raise ValueError(f"custom base-model file must be relative and end in {allowed}")
+
+    revision = _text(revision, "custom base-model revision", 256)
+    if any(ord(char) < 32 for char in revision):
+        raise ValueError("custom base-model revision contains control characters")
+    return {"repo_id": repo_id, "filename": filename, "revision": revision}
+
+
 def stable_custom_lora_namespace(repo_id: str, filename: str, revision: str = "") -> str:
     """Return a filesystem-safe stable namespace for one remote LoRA."""
+    identity = "\x00".join((repo_id, revision, filename)).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:20]
+
+
+def stable_custom_base_model_namespace(repo_id: str, filename: str, revision: str = "") -> str:
+    """Return a filesystem-safe stable namespace for one remote base model."""
     identity = "\x00".join((repo_id, revision, filename)).encode("utf-8")
     return hashlib.sha256(identity).hexdigest()[:20]
 
@@ -142,6 +184,7 @@ def build_settings(
     gen_budget: float,
     effective_seed: int | None = None,
     base_model: str = "",
+    custom_base_model: dict[str, Any] | None = None,
     catalog_loras: list[dict[str, Any]] | None = None,
     custom_loras: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -150,6 +193,11 @@ def build_settings(
         "app": APP_ID,
         "schema_version": PROFILE_SCHEMA_VERSION,
         "base_model": _text(base_model, "base model", 256),
+        "custom_base_model": (
+            validate_custom_base_model(custom_base_model)
+            if custom_base_model
+            else None
+        ),
         "mode": _text(mode, "mode", 32),
         "prompt": _text(prompt, "prompt"),
         "edit_prompt": _text(edit_prompt, "edit prompt"),

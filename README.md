@@ -20,6 +20,7 @@ This Space runs Krea 2 Turbo through headless ComfyUI execution. It provides:
 - Instruction-based image editing with an optional second reference image.
 - Krea 2 Identity Edit v1.2 conditioning for the edit mode.
 - Two selectable custom Krea 2 Turbo checkpoints.
+- An option to download and use a custom base checkpoint from any accessible Hugging Face repository.
 - A catalog of Krea 2 LoRAs with signed weight controls and search/filtering.
 - Custom LoRAs from any accessible Hugging Face repository.
 - Seed, sampling, grounding, and reference-fidelity controls.
@@ -36,6 +37,12 @@ The base-model selector provides both checkpoints from [mpasila/Krea-2-Models](h
 | `pornmasterKrea2_v2TurboInt8.safetensors` | PornMaster Krea 2 Turbo diffusion model |
 | `qwen3vl_4b_fp8_scaled.safetensors` | Krea 2 Qwen3-VL text encoder |
 | `qwen_image_vae.safetensors` | Krea 2 VAE |
+
+Choose **Custom Hugging Face base model** in the base checkpoint selector to provide a repository,
+relative model filename, and optional revision. Supported files use `.safetensors`, `.ckpt`, `.pt`,
+or `.bin` extensions. The checkpoint is downloaded lazily into ComfyUI's managed diffusion-model
+directory and cached in a stable repository/revision namespace. Private repositories require the
+`HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` environment variable.
 
 Edit mode also downloads `krea2_identity_edit_v1_2.safetensors` from
 [conradlocke/krea2-identity-edit](https://huggingface.co/conradlocke/krea2-identity-edit).
@@ -79,4 +86,4 @@ edit instruction more strongly; higher values usually preserve reference identit
 
 Generated PNGs include a `krea_settings` JSON object and a readable `parameters` field. Source image
 bytes are never stored in exported settings profiles. Profiles also preserve the selected checkpoint,
-catalog weights, and custom Hugging Face LoRA rows.
+custom base-model repository/file/revision, catalog weights, and custom Hugging Face LoRA rows.

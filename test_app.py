@@ -71,6 +71,32 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["4"]["inputs"]["model"], ["user_lora_1", 0])
         self.assertEqual(workflow["5"]["inputs"]["clip"], ["user_lora_1", 1])
 
+    def test_custom_base_model_download_uses_managed_namespace(self):
+        original_models = app.MODELS
+        with tempfile.TemporaryDirectory() as directory:
+            app.MODELS = Path(directory) / "models"
+
+            def fake_download(**kwargs):
+                destination = Path(kwargs["local_dir"]) / kwargs["filename"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b"test")
+                return str(destination)
+
+            try:
+                with patch.object(app, "hf_hub_download", side_effect=fake_download):
+                    relative = app._ensure_custom_base_model({
+                        "repo_id": "org/repo",
+                        "filename": "sub/base.safetensors",
+                        "revision": "main",
+                    })
+            finally:
+                app.MODELS = original_models
+
+        self.assertTrue(relative.startswith("huggingface/"))
+        self.assertTrue(relative.endswith("/sub/base.safetensors"))
+        workflow = app._t2i_workflow(relative)
+        self.assertEqual(workflow["1"]["inputs"]["unet_name"], relative)
+
     def test_edit_user_loras_follow_identity_adapter(self):
         workflow = app._edit_workflow(False, app.MUSE_KREA_FILE)
         app._inject_edit(
