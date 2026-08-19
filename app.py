@@ -926,6 +926,12 @@ def _profile_from_values(
 def create_ui() -> gr.Blocks:
     with gr.Blocks(title="Krea 2 Turbo Image Generator", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🖌️ Krea 2 Turbo Image Generator\nGenerate new images or edit a source image with Krea 2 Identity Edit.")
+        gr.Markdown(
+            "> ⚠️ **This Space might be taken down soon.** "
+            "Please **duplicate** this Space (top-right menu → *Duplicate this Space*) or **clone** it locally "
+            "(`git clone https://huggingface.co/spaces/mpasila/Krea-2-Turbo_I2I`) so you keep a working copy. "
+            "Once you have a local copy you can modify it to run on **Runpod**, a local GPU, or any other environment."
+        )
         with gr.Row():
             with gr.Column(scale=1):
                 mode = gr.Radio(["text2image", "edit"], value="text2image", label="mode")
