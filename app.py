@@ -68,9 +68,16 @@ KREA_REPO = "Comfy-Org/Krea-2"
 CUSTOM_KREA_REPO = "mpasila/Krea-2-Models"
 CUSTOM_KREA_FILE = "pornmasterKrea2_v2TurboInt8.safetensors"
 MUSE_KREA_FILE = "museByStableYogi_v25EXTENDEDTURBO.safetensors"
+GONZALOMO_FILE = "gonzaLomoKrea2_v40.safetensors"
+GONZALOMO_REPO = "metaloz/imgstuff"
 DEFAULT_BASE_MODEL = CUSTOM_KREA_FILE
 CUSTOM_BASE_MODEL = "__custom_huggingface_base_model__"
 BASE_MODELS = {
+    GONZALOMO_FILE: {
+        "label": "GonzaLomo Krea 2 v4",
+        "repo": GONZALOMO_REPO,
+        "filename": GONZALOMO_FILE,
+    },
     MUSE_KREA_FILE: {
         "label": "Muse By Stable Yogi Krea2",
         "repo": CUSTOM_KREA_REPO,
