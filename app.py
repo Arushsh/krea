@@ -645,10 +645,11 @@ def _inject_edit(
 def _execute_workflow(workflow: dict[str, Any]) -> list[str]:
     import execution
     import server
+    from app.assets.manager import default_asset_manager
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    server_instance = server.PromptServer(loop)
+    server_instance = server.PromptServer(loop, default_asset_manager())
     executor = execution.PromptExecutor(
         server_instance,
         cache_type=execution.CacheType.RAM_PRESSURE,
