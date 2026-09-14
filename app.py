@@ -220,39 +220,14 @@ def _init_comfy_nodes() -> None:
             del sys.modules[name]
     os.chdir(COMFY)
 
-    import inspect
     import execution
     import nodes
     import server
+    from app.assets.manager import default_asset_manager
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    init_params = inspect.signature(server.PromptServer.__init__).parameters
-    kwargs = {}
-    if "asset_manager" in init_params:
-        asset_manager = None
-        for import_path in (
-            "app.assets.manager",
-            "app.assets",
-            "app.asset_manager",
-            "comfy.asset_manager",
-        ):
-            try:
-                module = __import__(import_path, fromlist=["default_asset_manager"])
-                factory = getattr(module, "default_asset_manager", None)
-                if factory is not None:
-                    asset_manager = factory()
-                    break
-            except Exception:
-                continue
-        if asset_manager is None:
-            class _DisabledAssetManager:
-                enabled = False
-            asset_manager = _DisabledAssetManager()
-        kwargs["asset_manager"] = asset_manager
-
-    server_instance = server.PromptServer(loop, **kwargs)
+    server_instance = server.PromptServer(loop, default_asset_manager())
     execution.PromptQueue(server_instance)
     loop.run_until_complete(nodes.init_extra_nodes())
     _nodes_ready = True
